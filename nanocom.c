@@ -126,10 +126,10 @@ int main(int argc, char *argv[])
     while (1) switch (getopt(argc,argv,":tkslxnf:"))
     {
        case 't': timestamp++; break;
-       case 'k': keylock=1; break;
-       case 's': bsisdel=1; break;
-       case 'l': enterislf=1; break;
-       case 'x': showhex++; break;
+       case 'k': keylock^=1; break;
+       case 's': bsisdel^=1; break;
+       case 'l': enterislf^=1; break;
+       case 'x': showhex=(showhex+1)%3; break;
        case 'n': native=1; break; 
        case 'f': teefile=optarg; break;
             
@@ -242,8 +242,8 @@ int main(int argc, char *argv[])
                                 printf("Enter key sends %s.\n", enterislf?"LF":"CR");
                                 break;
                              case 'x':
-                                showhex++; if (showhex > 2) showhex=0; // handle extra -x args
-                                printf("%s characters are shown as hex.\n", (showhex == 1)?"Unprintable":(showhex == 2)?"All":"No");
+                                showhex = (showhex+1) % 3; 
+                                printf("%s characters are shown as hex.\n", (showhex==1)?"Unprintable":(showhex==2)?"All":"No");
                                 break;
                              case 'e':
                                 put(serial, (char []){fs}, 1);
