@@ -1,4 +1,27 @@
-// Copyright 2013 by TiVo Inc. All Rights Reserved
+// Nanocom serial terminal
+
+// This is free and unencumbered software released into the public domain.
+//
+// Anyone is free to copy, modify, publish, use, compile, sell, or distribute
+// this software, either in source code form or as a compiled binary, for any
+// purpose, commercial or non-commercial, and by any means.
+// 
+// In jurisdictions that recognize copyright laws, the author or authors of
+// this software dedicate any and all copyright interest in the software to the
+// public domain. We make this dedication for the benefit of the public at
+// large and to the detriment of our heirs and successors. We intend this
+// dedication to be an overt act of relinquishment in perpetuity of all present
+// and future rights to this software under copyright law.
+// 
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+// AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+// ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+// WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+// 
+// For more information, please refer to <http://unlicense.org/>
+
 #include <termios.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,10 +60,10 @@ static void die(char *fmt,...)
     va_list ap;
     
     tcsetattr(console,TCSANOW,&cooked);                 // restore original settings
+    if (leftmost != 3) fprintf(stderr, "\n");           // fix cursor
     va_start(ap, fmt);
-    if (leftmost != 3) fprintf(stderr, "\n");
     vfprintf(stderr, fmt, ap);
-    exit(0);
+    exit(1);
 }
 
 // get character from file descriptor
@@ -96,6 +119,7 @@ int main(int argc, char *argv[])
     int x;
     char *device_name;
     char *teefile=NULL;
+    sigset_t sigs;
     
     tcgetattr(console,&cooked);                             // get this first so die() will work
 
@@ -118,11 +142,11 @@ int main(int argc, char *argv[])
   
     if (teefile && (tee=open(teefile, O_CREAT|O_WRONLY|O_APPEND))<0) die("Could not open tee file '%s': %s\n", teefile, strerror(errno));
 
-    // hunt for device, /dev/device, or /dev/ttydevice
-    device_name=malloc(strlen(argv[optind]+10));
-    for (x=0; x <= 2; x++)
+    // hunt for device, /dev/device, or /dev/ttydevice, or /dev/tty.device
+    device_name=malloc(strlen(argv[optind]+32));
+    for (x=0; x <= 3; x++)
     {
-        char *path[] = {"%s","/dev/%s", "/dev/tty%s"};
+        char *path[] = {"%s","/dev/%s", "/dev/tty%s", "/dev/tty.%s" };
         sprintf(device_name, path[x], argv[optind]);
         serial = open(device_name, O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial > 0) goto opened;
@@ -139,7 +163,7 @@ int main(int argc, char *argv[])
     raw.c_lflag = 0;
     raw.c_cc[VMIN]=1;                                       
     raw.c_cc[VTIME]=0;  
-    tcsetattr(console,TCSANOW,&raw);                        
+    if (tcsetattr(console,TCSANOW,&raw)) die("Unable to configure console: %s\n", strerror(errno));                        
     
     // setup serial port
     tcgetattr(serial, &io);
@@ -150,10 +174,11 @@ int main(int argc, char *argv[])
     if (!native)
     {
         // force 115200 N81
-        io.c_cflag = B115200 | CS8 | CLOCAL | CREAD;
+        io.c_cflag = CS8 | CLOCAL | CREAD;
         io.c_iflag = IGNPAR;
+        cfsetspeed(&io, 115200);
     }
-    tcsetattr(serial, TCSANOW, &io);
+    if (tcsetattr(serial, TCSANOW, &io)) die ("Unable to configure serial port: %s\n", strerror(errno));
     
     while(1)
     {
@@ -199,7 +224,7 @@ int main(int argc, char *argv[])
                         switch(*p)
                         {
                              case 0: break; 
-                             case 'q': die("Connection closed.\n");
+                             case 'q': exit(0); // normal exit
                              case 't': 
                                 timestamp++; if (timestamp > 2) timestamp=0; // handle extra -t args
                                 printf("Timestamps are %s.\n",(timestamp == 1)?"on":(timestamp == 2)?"on, with date":"off");
