@@ -163,8 +163,6 @@ int main(int argc, char *argv[])
     int bsisdel=0;          // send del for bs
     int native=0;           // default, set 115200 N81
     int timestamp=0;        // show timestamp
-    char **p;
-    char *paths[] = {"%s","/dev/%s", "/dev/cu%s", "/dev/tty%s", "/dev/cu.%s", "/dev/tty.%s", NULL };
 
     tcgetattr(console,&term);                               // get this first so die() will work
 
@@ -190,7 +188,8 @@ int main(int argc, char *argv[])
 
     // hunt for device
     device_name=malloc(strlen(argv[optind]+32));
-    for (p=paths;; p++)
+    char *paths[] = {"%s","/dev/%s", "/dev/cu%s", "/dev/tty%s", "/dev/cu.%s", "/dev/tty.%s", NULL };
+    for (char**p=paths;;p++)
     {
         if (!*p) die("Could not open '%s'\n", argv[optind]);
         sprintf(device_name, *p, argv[optind]);
@@ -300,7 +299,6 @@ int main(int argc, char *argv[])
             if (n <= 0)
             {
                 // urk, device has disappeared?
-                int tries=15;
                 if (!reconnect) die("Connection error.\n");
                 cooked();
                 warn("Connection error.\n");
