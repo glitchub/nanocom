@@ -53,7 +53,7 @@ int cursor=3;           // cursor state, bit 0 == cr'd, bit 1 == lf'd
 static void raw(void)
 {
     struct termios t;
-    memset(&t,sizeof(t),0);
+    memset(&t,0,sizeof(t));
     t.c_cflag=term.c_cflag;
     t.c_iflag=term.c_iflag;
     t.c_oflag = 0;
