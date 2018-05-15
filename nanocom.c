@@ -120,7 +120,7 @@ static void stamp(int mode)
 
         gettimeofday(&t,NULL);
         l=localtime(&t.tv_sec);
-        sprintf(ts+strftime(ts, sizeof(ts)-10, (mode==1)?"[%H:%M:%S":"[%Y/%m/%d %H:%M:%S", l),".%.3d] ", t.tv_usec/1000);
+        sprintf(ts+strftime(ts, sizeof(ts)-10, (mode==1)?"[%H:%M:%S":"[%Y/%m/%d %H:%M:%S", l),".%.3d] ", (int)t.tv_usec/1000);
         put(console, ts, strlen(ts));
     }
 }
