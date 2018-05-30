@@ -36,13 +36,15 @@
 #include <errno.h>
 #include <time.h>
 #include <ctype.h>
+#include <sys/wait.h>
 
 // magic characters
 #define lf 10
 #define cr 13
 #define fs 28           // aka "^\", escape char, different from telnet's
 
-#define console 0       // console device
+#define console 2       // console device
+
 struct termios term;    // original console state
 int cursor=3;           // cursor state, bit 0 == cr'd, bit 1 == lf'd
 
@@ -96,10 +98,10 @@ appropriate serial device such as '/dev/ttyS0' or '/dev/tty.USB0'.\n\
 ")
 
 // get character from file descriptor
-static int get(int fd, char *s, size_t n)
+static int get(int fd, char *s)
 {
     int x;
-    while ((x=read(fd, s, n)) < 0 && errno == EINTR);
+    while ((x=read(fd, s, 1)) < 0 && errno == EINTR);
     return x;
 }
 
@@ -210,7 +212,9 @@ int main(int argc, char *argv[])
         if (FD_ISSET(console, &fds))                        // from console?
         {
             char c;
-            if (get(console, &c, 1) == 1)
+            int n=get(console, &c);
+            if (n < 0) die("Console connection error: %s\n", strerror(errno));
+            if (n)
             {
                 switch(c)
                 {
@@ -236,8 +240,9 @@ int main(int argc, char *argv[])
                         cooked();
                         cmd:
                         warn("nanocom %s> ",device_name);
-                        fgets(p=s,sizeof(s), stdin);
-                        while(isspace(*p)) p++;
+                        if (!fgets(s,sizeof(s), stdin)) die("fgets failed: %s\n", strerror(errno));
+                        p=strchr(s,'\n'); if (p) *p=0;
+                        p=s; while(isspace(*p)) p++;
                         switch(*p)
                         {
                              case 0: break;
@@ -265,7 +270,24 @@ int main(int argc, char *argv[])
                              case 'e':
                                 put(serial, (char []){fs}, 1);
                                 break;
-
+                             case '!':
+                             {
+                                int pid, status;
+                                p++; while (isspace(*p)) p++;
+                                if (!*p) { warn("No command specified!\n"); break; }
+                                warn("Starting '%s'...\n", p);
+                                pid=fork();
+                                if (pid < 0) die("Fork failed: %s\n", strerror(errno));
+                                if (!pid)
+                                {
+                                    fcntl(serial, F_SETFL, O_RDWR|O_NOCTTY); // blocking
+                                    if (dup2(serial,0) != 0 || dup2(serial,1) != 1) die("Unable to dup serial to stdin/stdout\n");
+                                    exit(system(p));
+                                }
+                                wait(&status);
+                                warn("'%s' exited with status %d\n", p, status);
+                             }
+                             break;
                              case 'h':
                              case '?':
                                 warn("Commands:\n"
@@ -276,6 +298,7 @@ int main(int argc, char *argv[])
                                        "  x        cycle hex display\n"
                                        "  q        quit\n"
                                        "  e        send escape (^\\)\n"
+                                       "  ! cmd    execute 'cmd' with serial stdin/stdout\n" 
                                        "  ?        print help information\n");
 
                                 goto cmd;
@@ -290,18 +313,18 @@ int main(int argc, char *argv[])
                 if (!keylock) put(serial, &c, 1);
             }
         }
-        conx:    
+        conx:
 
         if (FD_ISSET(serial, &fds))                         // from serial
         {
             unsigned char c; int n;
-            n=get(serial, (char *)&c, 1);
+            n=get(serial, (char *)&c);
             if (n <= 0)
             {
                 // urk, device has disappeared?
-                if (!reconnect) die("Connection error.\n");
+                if (!reconnect) die("Serial connection error\n");
                 cooked();
-                warn("Connection error.\n");
+                warn("Serial connection error\n");
                 close(serial);
                 while(1)
                 {

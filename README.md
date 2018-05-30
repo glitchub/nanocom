@@ -1,5 +1,5 @@
-A simple serial comm program with switchable timestamps, hex mode, etc., for
-use on embedded platforms.
+A simple serial comm program with switchable timestamps, hex mode, sz/rz
+support, etc, for use on embedded platforms.
 
 Usage:
 
