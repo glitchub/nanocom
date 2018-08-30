@@ -57,7 +57,7 @@ static void cooked()
 #define usage() die("\
 Usage:\n\
 \n\
-    nanocom [options] serial-device\n\
+    nanocom [options] serial_device\n\
 \n\
 where:\n\
 \n\
@@ -65,13 +65,10 @@ where:\n\
     -k      - enable keylock\n\
     -l      - ENTER key sends LF \n\
     -n      - use existing stty config, do not force 115200 N-8-1\n\
-    -r      - try to reconnect to serial device if it returns an error\n\
+    -r      - try to reconnect to serial device if it won't open or closes with error\n\
     -s      - BS key sends DEL \n\
     -t      - enable timestamps (use twice to enable dates)\n\
     -x      - show unprintable chars as hex (use twice to show all chars as hex)\n\
-\n\
-Will attempt to resolve a partial device name such as 'ttyS0' or 'USB0' to an\n\
-appropriate serial device such as '/dev/ttyS0' or '/dev/tty.USB0'.\n\
 ")
 
 // get character from file descriptor
@@ -165,15 +162,18 @@ int main(int argc, char *argv[])
 
     if (teefile && (tee=open(teefile, O_CREAT|O_WRONLY|O_APPEND))<0) die("Could not open tee file '%s': %s\n", teefile, strerror(errno));
 
-    // hunt for device
-    device_name=malloc(strlen(argv[optind]+32));
-    char *paths[] = {"%s","/dev/%s", "/dev/cu%s", "/dev/tty%s", "/dev/cu.%s", "/dev/tty.%s", NULL };
-    for (char**p=paths;;p++)
+    device_name=argv[optind];
+    serial = open_serial(device_name, native);
+    if (serial <= 0)
     {
-        if (!*p) die("Could not open '%s'\n", argv[optind]);
-        sprintf(device_name, *p, argv[optind]);
-        serial = open_serial(device_name, native);
-        if (serial > 0) break;
+        if (!reconnect) die("Could not open '%s'\n", argv[optind]);
+        warn("Could not open '%s'\n", argv[optind]);
+        while (serial <= 0)
+        {
+            warn("Retrying...\n");
+            sleep(1);
+            serial = open_serial(device_name, native);
+        }
     }
     warn("nanocom connected to %s, escape character is '^\\'.\n", device_name);
 
