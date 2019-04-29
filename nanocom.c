@@ -166,11 +166,11 @@ int main(int argc, char *argv[])
     serial = open_serial(device_name, native);
     if (serial <= 0)
     {
-        if (!reconnect) die("Could not open '%s'\n", argv[optind]);
-        warn("Could not open '%s'\n", argv[optind]);
+        if (!reconnect) die("Could not open '%s': %s\n", device_name, strerror(errno));
+        warn("Could not open %s: %s\n", device_name, strerror(errno));
         while (serial <= 0)
         {
-            warn("Retrying...\n");
+            warn("Retrying '%s'...\n", device_name);
             sleep(1);
             serial = open_serial(device_name, native);
         }
@@ -305,7 +305,7 @@ int main(int argc, char *argv[])
                 close(serial);
                 while(1)
                 {
-                    warn("Reconnecting...\n");
+                    warn("Reconnecting '%s'...\n", device_name);
                     serial=open_serial(device_name, native);
                     if (serial > 0) break;
                     sleep(1);
