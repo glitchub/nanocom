@@ -120,7 +120,7 @@ int open_serial(char *device, int native)
         // force 115200 N81
         io.c_cflag = CS8 | CLOCAL | CREAD;
         io.c_iflag = IGNPAR;
-        cfsetspeed(&io, 115200);
+        cfsetspeed(&io, B115200);
     }
     if (tcsetattr(f, TCSANOW, &io)) die ("Unable to configure %s: %s\n", device, strerror(errno));
     return f;
