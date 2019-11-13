@@ -20,33 +20,36 @@
 #define cr 13
 #define fs 28           // aka "^\", escape char, different from telnet's
 
-#define console 2       // console device
+#define console 1       // console device
 
 struct termios term;    // original console state
 int cursor=3;           // cursor state, bit 0 == cr'd, bit 1 == lf'd
 
-// write to stderr, expects console in cooked mode!
-#define warn(...) fprintf(stderr, __VA_ARGS__)
+// write to stdout, expects console in cooked mode!
+#define warn(...) fprintf(stdout, __VA_ARGS__)
 
 // put console in raw mode
 static void raw(void)
 {
-    struct termios t;
-    memset(&t,0,sizeof(t));
-    t.c_cflag=term.c_cflag;
-    t.c_iflag=term.c_iflag;
-    t.c_oflag = 0;
-    t.c_lflag = 0;
-    t.c_cc[VMIN]=1;
-    t.c_cc[VTIME]=0;
-    tcsetattr(console,TCSANOW,&t);
+    if (isatty(console))
+    {
+        struct termios t;
+        memset(&t,0,sizeof(t));
+        t.c_cflag=term.c_cflag;
+        t.c_iflag=term.c_iflag;
+        t.c_oflag = 0;
+        t.c_lflag = 0;
+        t.c_cc[VMIN]=1;
+        t.c_cc[VTIME]=0;
+        tcsetattr(console,TCSANOW,&t);
+    }
     cursor=3; // probably true
 }
 
-// restore console to original cooked mode
 static void cooked()
 {
-    tcsetattr(console,TCSANOW,&term);
+    //  only if it really is a console
+    if (isatty(console)) tcsetattr(console, TCSANOW, &term);
     if (cursor != 3) warn("\n");
     cursor=3;
 }
@@ -61,9 +64,10 @@ Usage:\n\
 \n\
 where:\n\
 \n\
+    -d      - toggle DTR high on start\n\
     -f file - tee received serial data to specified file\n\
     -k      - enable keylock\n\
-    -l      - ENTER key sends LF \n\
+    -l      - ENTER key sends LF\n\
     -n      - use existing stty config, do not force 115200 N-8-1\n\
     -r      - try to reconnect to serial device if it won't open or closes with error\n\
     -s      - BS key sends DEL \n\
@@ -102,7 +106,7 @@ static void stamp(int mode)
 }
 
 // open given serial device and configure it
-int open_serial(char *device, int native)
+int open_serial(char *device, int native, int dtr)
 {
     struct termios io;
 
@@ -123,6 +127,16 @@ int open_serial(char *device, int native)
         cfsetspeed(&io, B115200);
     }
     if (tcsetattr(f, TCSANOW, &io)) die ("Unable to configure %s: %s\n", device, strerror(errno));
+
+    if (dtr)
+    {
+        ioctl(f, TIOCMBIC, (int[]){TIOCM_DTR}); // clear
+        ioctl(f, TIOCMBIS, (int[]){TIOCM_DTR}); // then set
+        ioctl(f, TIOCMBIS, (int[]){TIOCM_DTR}); // twice?
+        usleep(50000); // 50 mS
+        tcflush(f, TCIOFLUSH);
+    }
+
     return f;
 }
 
@@ -139,12 +153,14 @@ int main(int argc, char *argv[])
     int bsisdel=0;          // send del for bs
     int native=0;           // default, set 115200 N81
     int timestamp=0;        // show timestamp
+    int dtr=0;              // twiddle DTR
 
     tcgetattr(console,&term);                               // get this first so die() will work
 
-    while (1) switch (getopt(argc,argv,":f:klnrstx"))
+    while (1) switch (getopt(argc,argv,":df:klnrstx"))
     {
         case 'f': teefile=optarg; break;
+        case 'd': dtr^=1; break;
         case 'k': keylock^=1; break;
         case 'l': enterislf^=1; break;
         case 'n': native=1; break;
@@ -163,7 +179,7 @@ int main(int argc, char *argv[])
     if (teefile && (tee=open(teefile, O_CREAT|O_WRONLY|O_APPEND))<0) die("Could not open tee file '%s': %s\n", teefile, strerror(errno));
 
     device_name=argv[optind];
-    serial = open_serial(device_name, native);
+    serial = open_serial(device_name, native, dtr);
     if (serial <= 0)
     {
         if (!reconnect) die("Could not open '%s': %s\n", device_name, strerror(errno));
@@ -172,12 +188,13 @@ int main(int argc, char *argv[])
         {
             warn("Retrying '%s'...\n", device_name);
             sleep(1);
-            serial = open_serial(device_name, native);
+            serial = open_serial(device_name, native, dtr);
         }
     }
     warn("nanocom connected to %s, escape character is '^\\'.\n", device_name);
 
     raw();                                                  // console in raw mode
+
     while(1)
     {
         fd_set fds;
@@ -275,7 +292,7 @@ int main(int argc, char *argv[])
                                        "  x        cycle hex display\n"
                                        "  q        quit\n"
                                        "  e        send escape (^\\)\n"
-                                       "  ! cmd    execute 'cmd' with serial stdin/stdout\n" 
+                                       "  ! cmd    execute 'cmd' with serial stdin/stdout\n"
                                        "  ?        print help information\n");
 
                                 goto cmd;
@@ -306,7 +323,7 @@ int main(int argc, char *argv[])
                 while(1)
                 {
                     warn("Reconnecting '%s'...\n", device_name);
-                    serial=open_serial(device_name, native);
+                    serial=open_serial(device_name, native, dtr);
                     if (serial > 0) break;
                     sleep(1);
                 }
