@@ -7,6 +7,7 @@ Usage:
 
 where:
 
+    -d      - toggle DTR high on start
     -f file - tee received serial data to specified file
     -k      - enable keylock
     -l      - ENTER key sends LF 
