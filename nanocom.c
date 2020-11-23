@@ -10,13 +10,13 @@ contains a '/') or a TCP host (if target contains a ':').\n\
 \n\
 Options:\n\
 \n\
-    -b       - BS is DEL\n\
+    -b       - backspace keys sends DEL instead of BS\n\
     -d       - toggle serial port DTR high on start\n\
-    -e       - ENTER is LF (use twice for ENTER is CRLF)\n\
+    -e       - enter key sends LF instead of CR\n\
     -f file  - tee received data to specified file\n\
     -n       - use existing serial port config, do not force 115200 N-8-1\n\
     -r       - try to reconnect to target if it won't open or closes with error\n\
-    -s       - enable timestamps (use twice to enable dates)\n\
+    -t       - enable timestamps (use twice to enable dates)\n\
     -x       - show unprintable chars as hex (use twice to show all chars as hex)\n\
 \n\
 Once connected, pressing the escape character CTRL+\\ enters command mode, supporting\n\
@@ -24,11 +24,11 @@ the following commands:\n\
 \n" menu
 
 #define menu "\
-    b        - toggle BS key sends DEL\n\
-    e        - toggle ENTER key sends LF\n\
+    b        - toggle backspacekey sends DEL or BS\n\
+    e        - toggle enter key sends LF or CR\n\
     p        - pass escape (CTRL-\\) to target\n\
     q        - quit\n\
-    s        - cycle timestamps off, time, or date+time\n\
+    t        - cycle timestamps off, time, or date+time\n\
     x        - cycle hex off, unprintable, or all\n\
     ! cmd    - execute shell 'cmd' with stdin/stdout connected to target\n\
 \n\
@@ -313,7 +313,7 @@ static void command(void)
             case 'q':
                 exit(0);
 
-            case 's':
+            case 't':
                 timestamp++;
                 if (timestamp > 2) timestamp = 0;
                 sstat(0);
@@ -347,7 +347,7 @@ static void command(void)
 int main(int argc, char *argv[])
 {
 
-    while (1) switch (getopt(argc,argv,":bdef:nrstx"))
+    while (1) switch (getopt(argc,argv,":bdef:nrtx"))
     {
         case 'b': bsisdel++; break;
         case 'd': dtr++; break;
@@ -355,7 +355,7 @@ int main(int argc, char *argv[])
         case 'f': teename = optarg; break;
         case 'n': native++; break;
         case 'r': reconnect++; break;
-        case 's': timestamp++; break;
+        case 't': timestamp++; break;
         case 'x': showhex++; break;
 
         case ':':              // missing
