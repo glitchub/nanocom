@@ -1,6 +1,4 @@
 .PHONY: default clean
-CFLAGS=-Wall -Werror -std=gnu99
+CFLAGS = -Wall -Werror -Os -s
 default: nanocom
 clean:; rm nanocom
-
-
