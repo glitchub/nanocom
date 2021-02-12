@@ -11,10 +11,11 @@ contains a '/') or a TCP host (if target contains a ':').
 Options:
 
     -b       - backspace keys sends DEL instead of BS
+    -c       - target sends CP437 characters (IBM line draw)
     -d       - toggle serial port DTR high on start
     -e       - enter key sends LF instead of CR
     -f file  - tee received data to specified file
-    -n       - use existing serial port config, do not force 115200 N-8-1
+    -n       - use existing tty config, do not force 115200 N-8-1
     -r       - try to reconnect to target if it won't open or closes with error
     -t       - enable timestamps (use twice to enable dates)
     -x       - show unprintable chars as hex (use twice to show all chars as hex)

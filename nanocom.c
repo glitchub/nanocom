@@ -11,10 +11,11 @@ contains a '/') or a TCP host (if target contains a ':').\n\
 Options:\n\
 \n\
     -b       - backspace keys sends DEL instead of BS\n\
+    -c       - target sends CP437 characters (IBM line draw)\n\
     -d       - toggle serial port DTR high on start\n\
     -e       - enter key sends LF instead of CR\n\
     -f file  - tee received data to specified file\n\
-    -n       - use existing serial port config, do not force 115200 N-8-1\n\
+    -n       - use existing tty config, do not force 115200 N-8-1\n\
     -r       - try to reconnect to target if it won't open or closes with error\n\
     -t       - enable timestamps (use twice to enable dates)\n\
     -x       - show unprintable chars as hex (use twice to show all chars as hex)\n\
@@ -53,6 +54,8 @@ Enter any valid command, or just enter by itself, to exit command mode.\n\
 #include <sys/socket.h>
 #include <netdb.h>
 #include <poll.h>
+#include <iconv.h>
+#include <locale.h>
 
 // magic characters
 #define BS 8
@@ -77,6 +80,7 @@ int native = 0;         // 1 = don't force serial 115200 N81
 int timestamp = 0;      // 1 = show time, 2 = show date and time
 int dtr = 0;            // 1 = twiddle serial DTR on connect
 int israw = 0;          // 1 = console in raw mode
+int cp437 = 0;          // 1 = encode cp437
 
 #define msleep(mS) usleep(mS*1000)
 
@@ -133,9 +137,10 @@ static void flush(int fd)
     fcntl(fd, F_SETFL, flags);
 }
 
-// put character(s) to file descriptor
+// put character(s) to file descriptor, if size is 0 use strlen(s)
 static void put(int fd, char *s, size_t n)
 {
+    if (!n) n = strlen(s);
     while (write(fd, s, n) < 0 && (errno == EAGAIN || errno == EINTR));
 }
 
@@ -144,7 +149,7 @@ static void hex(int c)
 {
     char s[5];
     snprintf(s, 5, "[%.2X]", c);
-    put(console, s, 4);
+    put(console, s, 0);
 }
 
 // if enabled, put current time or time/date to console and return -1. Else return 0
@@ -157,7 +162,7 @@ static int stamp(void)
 
     char ts[40];
     sprintf(ts + strftime(ts, sizeof(ts)-10, (timestamp < 2) ? "[%H:%M:%S" : "[%Y-%m-%d %H:%M:%S", l),".%.3d] ", (int)t.tv_usec/1000);
-    put(console, ts, strlen(ts));
+    put(console, ts, 0);
     return -1;
 }
 
@@ -344,12 +349,42 @@ static void command(void)
     raw(); // back to raw mode
 }
 
+// encoded CP437 characters 128-255, if not NULL
+char *encoded[128] = {NULL};
+
+// configure encoding and return true, or false if can't
+int setencode(void)
+{
+    int n = 0;
+    // Convert CP437 to native
+    setlocale(LC_CTYPE, "");
+    iconv_t cd = iconv_open("//TRANSLIT", "CP437");
+    if (cd == (iconv_t)-1) goto out;
+    // for each high character
+    for (n = 128; n <= 255; n++)
+    {
+        // try to determine native sequence
+        char i = n, *in = &i, buf[8], *out = buf;
+        size_t nin = 1, nout = sizeof(buf);
+        if (iconv(cd, &in, &nin, &out, &nout) >= 0 && nout < sizeof(buf))
+        {
+            // save it, XXX this will break if the sequence contains NUL
+            encoded[n & 127] = strndup(buf, sizeof(buf) - nout);
+        }
+    }
+    iconv_close(cd);
+    out:
+    setlocale(LC_CTYPE, "C");
+    return n > 0;
+}
+
 int main(int argc, char *argv[])
 {
 
-    while (1) switch (getopt(argc,argv,":bdef:nrtx"))
+    while (1) switch (getopt(argc,argv,":bcdef:nrtx"))
     {
         case 'b': bsisdel++; break;
+        case 'c': cp437++; break;
         case 'd': dtr++; break;
         case 'e': enterislf++; break;
         case 'f': teename = optarg; break;
@@ -371,6 +406,12 @@ int main(int argc, char *argv[])
     if (teename && (tee = fopen(teename, "a"))) die("Could not open tee file '%s': %s\n", teename, strerror(errno));
 
     signal(SIGPIPE, SIG_IGN);
+
+    if (cp437 && !setencode())                              // configure cp437 encoding
+    {
+        printf("Warning, can't encode CP437 on this terminal\n");
+        cp437 = 0;
+    }
 
     tcgetattr(console,&orig);                               // get original tty states
     raw();                                                  // put console in raw mode
@@ -455,6 +496,11 @@ int main(int argc, char *argv[])
                 if (showhex && !isprint(c))                 // maybe show unprintable as hex
                 {
                     hex(c);
+                    break;
+                }
+                if (cp437 && c > 127 && encoded[c & 127])   // if cp437 high character
+                {
+                    put(console, encoded[c & 127], 0);      // put utf8 (or whatever for this console)
                     break;
                 }
             }
