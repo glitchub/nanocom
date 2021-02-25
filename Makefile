@@ -1,6 +1,9 @@
 .PHONY: default clean
-CFLAGS = -Wall -Werror -Os -s
-# old gcc may need this
+
+CFLAGS = -Wall -Werror -Os -s -lutil
+
+# Comment in for older gcc
 # CFLAGS += -std=gnu11
+
 default: nanocom
-clean:; rm nanocom
+clean:; rm -f nanocom

@@ -1,34 +1,21 @@
-A simple serial comm program with switchable timestamps, hex mode, sz/rz
-support, etc, for use on embedded platforms.
+A simple serial/tcp comm program intended for use with embedded systems.
 
 Usage:
 
     nanocom [options] /dev/ttyX|host:port
 
-Connect tty to specified target, which is either a serial device (if target
-contains a '/') or a TCP host (if target contains a ':').
+Connect current tty to specified target, which is either a serial device (if
+target contains a '/') or a TCP host (if target contains a ':').
 
 Options:
 
     -b       - backspace keys sends DEL instead of BS
-    -c       - target sends CP437 characters (IBM line draw)
+    -c       - encode CP437 characters from target (IBM line draw)
     -d       - toggle serial port DTR high on start
-    -e       - enter key sends LF instead of CR
+    -e       - enter key sends LF instead of CR (use twice to send CRLF)
     -f file  - tee received data to specified file
-    -n       - use existing tty config, do not force 115200 N-8-1
+    -n       - use existing tty config, don't force 115200 N-8-1
     -r       - try to reconnect to target if it won't open or closes with error
-    -t       - enable timestamps (use twice to enable dates)
+    -s       - enable timestamps (use twice to enable dates)
+    -t       - enable telnet IAC handling (use twice to disable server ECHO)
     -x       - show unprintable chars as hex (use twice to show all chars as hex)
-
-Once connected, pressing the escape character CTRL+\ enters command mode, supporting
-the following commands:
-
-    b        - toggle backspacekey sends DEL or BS
-    e        - toggle enter key sends LF or CR
-    p        - pass escape (CTRL-\) to target
-    q        - quit
-    t        - cycle timestamps off, time, or date+time
-    x        - cycle hex off, unprintable, or all
-    ! cmd    - execute shell 'cmd' with stdin/stdout connected to target
-
-Enter any valid command, or just enter by itself, to exit command mode.
