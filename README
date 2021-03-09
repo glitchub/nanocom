@@ -1,4 +1,5 @@
-A simple serial/tcp comm program intended for use with embedded systems.
+A simple serial/tcp comm program intended for use with (and on) embedded
+systems.  Supports telnet and high-character locale mapping.
 
 Usage:
 
@@ -9,13 +10,13 @@ target contains a '/') or a TCP host (if target contains a ':').
 
 Options:
 
-    -b       - backspace keys sends DEL instead of BS
-    -c       - encode CP437 characters from target (IBM line draw)
-    -d       - toggle serial port DTR high on start
-    -e       - enter key sends LF instead of CR (use twice to send CRLF)
-    -f file  - tee received data to specified file
-    -n       - use existing tty config, don't force 115200 N-8-1
-    -r       - try to reconnect to target if it won't open or closes with error
-    -s       - enable timestamps (use twice to enable dates)
-    -t       - enable telnet IAC handling (use twice to disable server ECHO)
-    -x       - show unprintable chars as hex (use twice to show all chars as hex)
+    -b          - backspace key sends DEL instead of BS
+    -d          - toggle serial port DTR high on start
+    -e          - enter key sends LF instead of CR, 2X to send CR+LF, 3X to send CR+NUL
+    -f file     - tee received data to specified file
+    -i encoding - encoding for high characters, empty string to pass verbatim ('iconv -l' for list)
+    -n          - don't set serial port to 115200 N-8-1, use it as is
+    -r          - try to reconnect target if it won't open or closes with error
+    -s          - enable timestamps, 2X to also show date
+    -t          - enable telnet IAC handling, 2X to disable BINARY and default enter to CR+NUL
+    -x          - show unprintable chars as hex, 2X to show all chars as hex
