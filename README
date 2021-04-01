@@ -12,11 +12,12 @@ Options:
 
     -b          - backspace key sends DEL instead of BS
     -d          - toggle serial port DTR high on start
-    -e          - enter key sends LF instead of CR, 2X to send CR+LF, 3X to send CR+NUL
-    -f file     - tee received data to specified file
-    -i encoding - encoding for high characters, empty string to pass verbatim ('iconv -l' for list)
+    -e          - enter key sends LF instead of CR
+    -f file     - tee displayed output to specified file
+    -i encoding - encoding for high characters e.g. 'CP437', or '' to display verbatim
     -n          - don't set serial port to 115200 N-8-1, use it as is
     -r          - try to reconnect target if it won't open or closes with error
-    -s          - enable timestamps, 2X to also show date
-    -t          - enable telnet IAC handling, 2X to disable BINARY and default enter to CR+NUL
-    -x          - show unprintable chars as hex, 2X to show all chars as hex
+    -s          - display timestamp, 2X to display with date
+    -t          - enable telnet in binary mode, 2X for ASCII mode (handles CR+NUL)
+    -x          - display unprintable chars as hex, 2X for all chars
+

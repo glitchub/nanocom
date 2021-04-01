@@ -16,14 +16,14 @@ Options:\n\
 \n\
     -b          - backspace key sends DEL instead of BS\n\
     -d          - toggle serial port DTR high on start\n\
-    -e          - enter key sends LF instead of CR, 2X to send CR+LF, 3X to send CR+NUL\n\
-    -f file     - tee received data to specified file\n\
-    -i encoding - encoding for high characters, empty string to pass verbatim ('iconv -l' for list)\n\
+    -e          - enter key sends LF instead of CR\n\
+    -f file     - tee displayed output to specified file\n\
+    -i encoding - encoding for high characters e.g. 'CP437', or '' to display verbatim\n\
     -n          - don't set serial port to 115200 N-8-1, use it as is\n\
     -r          - try to reconnect target if it won't open or closes with error\n\
-    -s          - enable timestamps, 2X to also show date\n\
-    -t          - enable telnet IAC handling, 2X to disable BINARY and default enter to CR+NUL\n\
-    -x          - show unprintable chars as hex, 2X to show all chars as hex\n\
+    -s          - display timestamp, 2X to display with date\n\
+    -t          - enable telnet in binary mode, 2X for ASCII mode (handles CR+NUL)\n\
+    -x          - display unprintable chars as hex, 2X for all chars\n\
 \n\
 "
 
@@ -48,109 +48,40 @@ Options:\n\
 #include <iconv.h>
 #include <locale.h>
 
-// magic characters
+// ASCII controls of interest
+#define NUL 0
 #define BS 8
+#define TAB 9
 #define LF 10
+#define FF 12
 #define CR 13
-#define FS 28                   // aka CTRL-\, our escape character
+#define ESC 27
+#define FS 28                   // aka ^\, our escape character
 #define DEL 127
 
-// magic telnet IAC characters, these are also used as states
-#define SB 250                  // IAC SB = start suboption
-#define SE 240                  // IAC SE = end suboption
-#define WILL 251                // IAC WILL XX = will support option XX
-#define WONT 252                // IAC WONT XX = won't perform option XX
-#define DO 253                  // IAC DO XX = do perform option XX
-#define DONT 254                // IAC DONT XX = don't perform option XX
-#define IAC 255                 // IAC IAC = literal 0xff character
-
-// derived states
-#define SBX 0x100               // waiting for end of suboption
-#define SBTT 0x200              // waiting for TTYPE suboption command
-
-// the "X" options of interest
-#define BINARY 0                // unescaped binary
-#define SECHO 1                 // server echo
-#define SGA 3                   // suppress go ahead (we require this)
-#define TTYPE 24                // terminal type, required for binary
-#define NAWS 31                 // negotiate about window size
-
-#define console 1               // console device aka stdout
-
-char *targetname;               // "/dev/ttyX" or "host:port"
-int clean = 1;                  // 1 = cursor at start of line
-int target = -1;                // target file handle or socket, if >= 0
-FILE *tee = NULL;               // tee file handle
-
 // options
+char *targetname;               // target name, eg "/dev/ttyX" or "host:port"
 char *teename = NULL;           // tee file name
 int reconnect = 0;              // 1 = reconnect after failure
 int showhex = 0;                // 1 = show received unprintable as hex, 2 = show all as hex
-int enterkey = 0;               // 0 = enter key sends cr, 1 = lf, 2 = crlf
+int enterkey = 0;               // 1 = enter key sends LF instead of CR
 int bskey = 0;                  // 1 = send DEL for BS
 int native = 0;                 // 1 = don't force serial 115200 N81
 int timestamp = 0;              // 1 = show time, 2 = show date and time
 int dtr = 0;                    // 1 = twiddle serial DTR on connect
 char *encoding = NULL;          // encoding name (see iconv -l)
-int telnet = 0;                 // 1 = support telnet IACs
+int telnet = 0;                 // 1 = BINARY telnet, 2 = ASCII telnet
+
+// global file descriptors
+int target = -1;                // target device or socket, if >= 0
+int tee = -1;                   // tee file descriptor, if >= 0
 
 #define msleep(mS) usleep(mS*1000)
 
 // restore console to cooked mode and die
 #define die(...) cooked(), printf(__VA_ARGS__), exit(1)
 
-#define RAW 0
-#define WARM 1
-#define COOKED 2
-void ctty(int mode);
-void cooked(void) { ctty(COOKED); }
-
-// change console mode to RAW, WARM, or COOKED
-void ctty(int mode)
-{
-    static struct termios orig;
-    static int current = -1;
-    if (mode != current)
-    {
-        if (current < 0)
-        {
-            // first time init
-            tcgetattr(console, &orig);
-            atexit(cooked); // restore cooked on unpexected exit
-        }
-
-        switch(mode)
-        {
-            case COOKED:
-                tcsetattr(console, TCSANOW, &orig);
-                if (!clean) printf("\n");
-                break;
-
-            case RAW:
-            {
-                struct termios t = orig;
-                t.c_iflag &= ~(IGNBRK | BRKINT | PARMRK);
-                t.c_lflag &= 0;
-                clean = 1;
-                tcsetattr(console, TCSANOW, &t);
-                break;
-            }
-
-            case WARM:
-            {
-                // like cooked but without ISIG
-                struct termios t = orig;
-                t.c_lflag &= ~ISIG;
-                tcsetattr(console, TCSANOW, &t);
-                if (!clean) printf("\n");
-                break;
-            }
-        }
-        current = mode;
-    }
-}
-
-// return character from file descriptor or -1 if unrecoverable error
+// Return character from file descriptor or -1 if unrecoverable error
 int get(int fd)
 {
     unsigned char c;
@@ -163,12 +94,14 @@ int get(int fd)
     }
 }
 
-// put character(s) to file descriptor, if size is 0 use strlen(s). Return -1
+// Put character(s) to file descriptor, if size is 0 use strlen(s). Return -1
 // on unrecoverable error.
-#define bytes(...) (char *)(unsigned char []){__VA_ARGS__}
-int put(int fd, char *s, size_t size)
+#define bytes(...) (char *)(unsigned char []){__VA_ARGS__}  // define an array of bytes
+int put(int fd, const char *s, size_t size)
 {
-    if (!size) size = strlen(s);
+    if (!s) return 0;                                       // ignore NULL
+    if (!size) size = strlen(s);                            // get size
+    if (!size) return 0;                                    // done if zero size
 
     while (1)
     {
@@ -183,43 +116,211 @@ int put(int fd, char *s, size_t size)
     }
 }
 
-// Put line ending to target as specified by enterkey, return -1 irf error.
-// Note telnet client-to-server may require CR+LF or CR+NUL
-int enter()
+// Console modes
+#define COOKED -1       // COOKED (whatever state console was in tom start with)
+#define WARMED -2       // COOKED without ISIG, used in the command menu
+#define RAW -3          // RAW, all characters must be sent via display()
+#define INIT -4         // perform one-time initialization, this must be least
+
+#define console 1       // console device aka stdout
+
+void display(int c);
+void cooked(void) { display(COOKED); } // called by die() and registered with atexit()
+
+// Given one of the modes above, configure the console. Or given a character in
+// RAW mode, display the character with timestamps, high-character encoding,
+// hex conversion, and mirror to teefile if enabled.
+void display(int c)
 {
-    switch (enterkey)
+    // Current mode, RAW, WARMED or COOKED
+    static int mode = 0;            // 0 triggers initialization
+    static struct termios config;   // initial console termios
+    static char **strings = NULL;   // table of 128 strings
+
+    // RAW console state: 0=clean, 1=dirty, 2=dirty with deferred CR
+    static int dirty = 0;
+
+    // put to console and maybe tee
+    void putcon(const char *s, size_t size)
     {
-        case 0:  return put(target, bytes(CR), 1);
-        case 1:  return put(target, bytes(LF), 1);
-        case 2:  return put(target, bytes(CR, LF), 2);
-        default: return put(target, bytes(CR, 0), 2);
+        put(console, s, size);
+        if (tee >= 0) put(tee, s, size);
     }
+
+    void putstamp(void)
+    {
+        if (!timestamp) return;
+        struct timeval t;
+        gettimeofday(&t, NULL);                             // get current time
+        struct tm *l = localtime(&t.tv_sec);
+        char s[40];                                         // format it
+        sprintf(s + strftime(s, sizeof(s)-10, (timestamp) > 1 ?  "[%Y-%m-%d %H:%M:%S": "[%H:%M:%S", l),".%.3d] ", (int)t.tv_usec/1000);
+        putcon(s, 0);
+    }
+
+    void putLF(void)
+    {
+        put(console, bytes(CR, LF), 2);                     // CRLF to console
+        if (tee >= 0) put(tee, bytes(LF), 1);               // LF to the tee
+    }
+
+    void putCR(void)
+    {
+        put(console, bytes(CR), 1);                         // CR to the console
+        if (tee >= 0) put(tee, bytes(LF), 1);               // but LF to the tee
+        putstamp();                                         // maybe (re)timestamp
+    }
+
+    if (c == INIT)
+    {
+        // one time initialize, this may die()
+        if (mode) return;                                   // meh
+        tcgetattr(console, &config);                        // save current console config
+        if (encoding && *encoding)
+        {
+            // create table of strings for high characters
+            strings = calloc(128, sizeof(char *));
+            if (!strings) die("Out of memory");
+            setlocale(LC_CTYPE, "");
+            iconv_t cd = iconv_open("//TRANSLIT", encoding);
+            if (cd == (iconv_t)-1) die("Invalid encoding '%s' (try 'iconv -l' for a list)\n", encoding);
+            int n;
+            for (n = 128; n < 256; n++)
+            {
+                // Determine the encoded string for each char and save in
+                // table.
+                char ch = n, *in = &ch, str[16], *out = str;
+                size_t nin = 1, nout = sizeof(str);
+                if (iconv(cd, &in, &nin, &out, &nout) < 0) die("iconv failed: %s\n", strerror(errno));
+                nout = sizeof(str) - nout;
+                strings[n & 127] = nout ? strndup(str, nout) : "?";;
+                if (!strings[n & 127]) die("Out of memory");
+            }
+            iconv_close(cd);
+            setlocale(LC_CTYPE, "C");
+        }
+        atexit(cooked);                                     // restore cooked on unexpected exit
+        mode = COOKED;                                      // we are now in COOKED mode
+        return;
+    }
+
+    if (c <= INIT || c > 255 || !mode) return;              // ignore invalid
+
+    if (c < 0)                                              // new mode?
+    {
+        if (c == mode) return;                              // oops, already set!
+        if (mode == RAW && dirty) putLF();                  // maybe linefeed when leaving RAW
+        mode = c;                                           // remember new mode
+        switch(mode)
+        {
+            case RAW:
+            {
+                struct termios t = config;
+                t.c_iflag &= ~(IGNBRK | BRKINT | PARMRK);
+                t.c_lflag &= 0;
+                tcsetattr(console, TCSANOW, &t);
+                dirty = 0;                                  // Assume cursor is at start of line
+                break;
+            }
+
+            case COOKED:
+                tcsetattr(console, TCSANOW, &config);       // restore original config
+                break;
+
+            case WARMED:
+            {
+                struct termios t = config;
+                t.c_lflag &= ~ISIG;                         // same as COOKED but without ISIG
+                tcsetattr(console, TCSANOW, &t);
+                break;
+            }
+        }
+        return;
+    }
+
+    // here, c is 0 to 255
+    if (mode != RAW) return;                                // ignore unless RAW mode
+
+    if (showhex > 1) goto hex;                              // maybe unconditional hex
+
+    switch(c)
+    {
+        case LF:                                            // LF
+            if (!dirty) putstamp();                         // timestamp a blank line
+            putLF();
+            dirty = 0;
+            return;
+
+        case CR:                                            // CR
+            if (showhex) goto hex;                          // maybe hex
+            if (dirty) dirty = 2;                           // ignore if clean else defer until next
+            return;
+
+        case TAB:                                           // various printables
+        case FF:
+        case ESC:
+            if (showhex) goto hex;                          // maybe hex
+            // fall through
+        case BS:
+        case 32 ... 126:
+            if (!dirty) putstamp();                         // timestamp a blank line
+            else if (dirty > 1) putCR();                    // or CR if deferred
+            break;
+
+        case 128 ... 255:                                   // high characters
+            if (showhex) goto hex;                          // maybe hex
+            if (!encoding) return;                          // ignore if not encoding
+            if (!dirty) putstamp();                         // timestamp a blank line
+            else if (dirty > 1) putCR();                    // or CR if deferred
+            if (!*encoding) break;                          // -i'' was specified, just go display
+            putcon(strings[c & 127], 0);                    // else put encoded string
+            dirty = 1;
+            return;
+
+        default:                                            // all others, ignore except hex
+            if (showhex)
+            {
+                char s[5];
+                hex:
+                sprintf(s, "[%.2X]", c & 0xff);
+                putcon(s, 0);
+                dirty = 1;
+            }
+            return;
+    }
+
+    // put character to the display
+    putcon(bytes(c), 1);
+    dirty = 1;
 }
 
-// put character as hex to console
-void hex(int c)
-{
-    char s[5];
-    snprintf(s, 5, "[%.2X]", c);
-    put(console, s, 0);
-}
+// Magic telnet IAC characters, these are also used as states
+#define SB 250      // IAC SB = start suboption
+#define SE 240      // IAC SE = end suboption
+#define WILL 251    // IAC WILL XX = will support option XX
+#define WONT 252    // IAC WONT XX = won't perform option XX
+#define DO 253      // IAC DO XX = do perform option XX
+#define DONT 254    // IAC DONT XX = don't perform option XX
+#define IAC 255     // IAC IAC = literal 0xff character
 
-// if enabled, put current time or time/date to console and return -1. Else return 0
-void stamp(int withdate)
-{
-    struct timeval t;
-    gettimeofday(&t, NULL);
-    struct tm *l = localtime(&t.tv_sec);
+// Derived states
+#define SBX 0x100   // waiting for end of suboption
+#define SBTT 0x200  // waiting for TTYPE suboption command
 
-    char ts[40];
-    sprintf(ts + strftime(ts, sizeof(ts)-10, withdate ?  "[%Y-%m-%d %H:%M:%S": "[%H:%M:%S", l),".%.3d] ", (int)t.tv_usec/1000);
-    put(console, ts, 0);
-}
+// The "XX" options of interest
+#define BINARY 0    // binary (doesn't use CR+NUL)
+#define SECHO 1     // server echo
+#define SGA 3       // suppress go ahead (we require this)
+#define TTYPE 24    // terminal type aka $TERM
+#define NAWS 31     // Negotiate About Window Size
 
-// Given a character from target server, process telnet IAC commands, return -1
-// if character is swallowed or 0 if character can be sent to target.
+// Given a character from target, process telnet IAC commands and return -1 if
+// character was swallowed else 0. Call with -1 after connect to initialize the
+// iac state machine.
 int iac(int c)
 {
+    if (!telnet) return 0; // only if telnet enabled
+
     // Send various IAC messages
     void senddo(int c) { put(target, bytes(IAC, DO, c), 3); }
     void senddont(int c) { put(target, bytes(IAC, DONT, c), 3); }
@@ -231,15 +332,18 @@ int iac(int c)
 
     if (c < 0)
     {
+        // initialize, when connection is established
         state = 0;
         isinit = 0;
-        return 0;
+        return -1;
     }
+
+    c &= 0xff;
 
     switch(state)
     {
         case 0:
-            if (c != IAC) return 0;                 // tell caller to send it
+            if (c != IAC) return 0;                 // caller can send it
             state = IAC;
             break;
 
@@ -248,7 +352,7 @@ int iac(int c)
             {
                 case IAC:                           // escaped
                     state = 0;
-                    return 0;                       // tell caller to send it
+                    return 0;                       // caller can send it
 
                 case SB:                            // use command code as state
                 case WILL:
@@ -350,8 +454,9 @@ int iac(int c)
     return -1; // character is swalloed
 }
 
-// open targetname and set target
-void do_connect()
+// Connect to specified targetname and set the 'target' file descriptor.
+// Targetname can be in form "host:port" or "/dev/ttyXXX".
+void contact()
 {
     int first = 1;
 
@@ -384,7 +489,7 @@ void do_connect()
                     io.c_iflag = IGNPAR;
                     cfsetspeed(&io, B115200);
                 }
-                if (tcsetattr(target, TCSANOW, &io)) die ("Unable to configure %s: %s\n", targetname, strerror(errno));
+                if (tcsetattr(target, TCSANOW, &io)) die ("Can't configure %s: %s\n", targetname, strerror(errno));
 
                 if (dtr)
                 {
@@ -406,9 +511,9 @@ void do_connect()
             *port++ = 0;
             struct addrinfo *ai, hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
             int res = getaddrinfo(host, port, &hints, &ai);
-            if (res) die("Unable to resolve %s: %s\n", targetname, gai_strerror(res));
+            if (res) die("Can't resolve %s: %s\n", targetname, gai_strerror(res));
             target = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-            if (target < 0) die("Unable to create socket: %s\n", strerror(errno));
+            if (target < 0) die("Can't create socket: %s\n", strerror(errno));
             if (connect(target, ai->ai_addr, ai->ai_addrlen))
             {
                 if (errno != ECONNREFUSED && errno != ETIMEDOUT) reconnect = 0;
@@ -421,7 +526,7 @@ void do_connect()
         else die("%s must contain '/' or ':'\n", targetname);
 
         // failed
-        if (first) printf("Could not connect to %s: %s\n", targetname, strerror(errno));
+        if (first) printf("Can't connect to %s: %s\n", targetname, strerror(errno));
         first=0;
         if (!reconnect) exit(1); // die
 
@@ -429,10 +534,10 @@ void do_connect()
         sleep(1);
     }
 
-    printf("nanocom connected to %s, escape character is 'CTRL-\\'.\n", targetname);
+    printf("nanocom connected to %s, escape character is '^\\'.\n", targetname);
 }
 
-// run shell command with stdin/stdout attached or passed to target
+// Run shell command with stdin/stdout attached or passed to target
 void run(char *cmd)
 {
     while (isspace(*cmd)) cmd++;
@@ -443,10 +548,10 @@ void run(char *cmd)
     }
 
     int cmdin[2], cmdout[2];
-    if (pipe(cmdin) || pipe(cmdout)) die("Unable to create pipes: %s\n", strerror(errno));
+    if (pipe(cmdin) || pipe(cmdout)) die("Can't create pipes: %s\n", strerror(errno));
 
     int pid = fork();
-    if (pid < 0) die("Unable to fork: %s\n", strerror(errno));
+    if (pid < 0) die("Can't fork: %s\n", strerror(errno));
 
     unsigned long long tx=0, rx=0;
     #define REND 0
@@ -470,8 +575,10 @@ void run(char *cmd)
     }
 
     // parent
-    close(cmdin[REND]);    // close read end of input pipe
-    close(cmdout[WEND]);   // close write end of output pipe
+    close(cmdin[REND]);         // close read end of input pipe
+    close(cmdout[WEND]);        // close write end of output pipe
+
+    int wascr = 0;
 
     while (1)
     {
@@ -481,12 +588,19 @@ void run(char *cmd)
         {
             int c = get(cmdout[REND]);                                  // read from child
             if (c < 0) break;                                           // done if terminated
+
             tx++;
-            switch(c)
+            if (c == CR && telnet > 1)                                  // CR is sent as CR+NUL if ASCII telnet
             {
-                case CR: enter(); break;                                // expand CR to target
-                case IAC: if (telnet) put(target, bytes(IAC), 1);       // escape telnet IAC and fall thru
-                default: put(target, bytes(c), 1); break;               // put the character
+                if (put(target, bytes(CR, NUL), 2)) break;
+            }
+            else if (c == IAC && telnet)                                // IAC must be escaped if telnet
+            {
+                if (put(target, bytes(IAC, IAC), 2)) break;
+            }
+            else
+            {
+                if (put(target, bytes(c), 1)) break;                    // otherwise send the character, done if unable
             }
         }
 
@@ -494,11 +608,21 @@ void run(char *cmd)
         {
             int c = get(target);                                        // read from target
             if (c < 0) break;                                           // urk, connection dropped
-            if (!telnet || !iac(c))                                     // if not swallowed by telnet
+
+            if (telnet && iac(c)) continue;                             // done if swallowed by telnet
+
+            if (telnet > 1)                                             // ASCII telnet?
             {
-                rx++;
-                if (put(cmdin[WEND], bytes(c), 1)) break;               // send to child, done if couldn't
+                if (wascr)                                              // If previous was CR
+                {
+                    wascr = 0;
+                    if (c == NUL) continue;                             // swallow the NUL if CR+NUL
+                }
+                if (c == CR) wascr = 1;                                 // Remember CR
             }
+
+            rx++;
+            if (put(cmdin[WEND], bytes(c), 1)) break;                   // send character to child, done if couldn't
         }
     }
 
@@ -510,63 +634,38 @@ void run(char *cmd)
     fprintf(stderr, "Command received %lld and sent %lld bytes\n", rx, tx);
 }
 
-// Handle CTRL-\ escape key
+// Command mode, invoked via the ^\ escape key.
 void command(void)
 {
-    void bstat(char *fmt) { printf(fmt, (char*[]){"BS", "DEL"}[bskey]); }
-    void estat(char *fmt) { printf(fmt, (char*[]){"CR", "LF", "CR+LF", "CR+NUL"}[enterkey]); }
+    void bstat(char *fmt) { printf(fmt, bskey ? "DEL" : "BS"); }
+    void estat(char *fmt) { printf(fmt, enterkey ? "LF" : "CR"); }
     void sstat(char *fmt) { printf(fmt, (char*[]){"off", "on", "on with date"}[timestamp]); }
-    void xstat(char *fmt) { printf(fmt, (char*[]){"off", "on", "all"}[showhex]); }
+    void xstat(char *fmt) { printf(fmt, (char*[]){"off", "unprintable", "all"}[showhex]); }
 
-    ctty(WARM); // cooked without signals
+    display(WARMED); // Cooked but without ^C, ^\, etc.
     while(1)
     {
-        stamp(0);
         printf("nanocom %s> ", targetname);
 
         // read command line
         char s[80];
-        if (!fgets(s, sizeof(s), stdin)) die("fgets failed: %s\n", strerror(errno));
+        fgets(s, sizeof(s), stdin);
 
         char *p = strchr(s, 0);;
-        while (p > s && isspace(*(p-1))) p--;           // rtrim
+        while (p > s && isspace(*(p - 1))) p--; // rtrim
         *p = 0;
-        for (p = s; isspace(*p); p++);                  // ltrim
-        if (!*p) break;                                 // we're done
-        if (*p == '!') run(p+1);
-        else if (*(p+1)) goto invalid;
+        for (p = s; isspace(*p); p++);          // ltrim
+        if (!*p) break;                         // done if line is empty
+        if (*p == '!') run(p + 1);              // shell command starts with '!'
+        else if (*(p + 1)) goto invalid;        // otherwise commands are one letter.
         else switch(*p)
         {
-            case 'b':
-                bskey = !bskey;
-                bstat("Backspace key sends %s\n");
-                break;
-
-            case 'e':
-                enterkey++;
-                if (enterkey > 3) enterkey = 0;
-                estat("Enter key sends %s\n");
-                break;
-
-            case 'p':
-                put(target, bytes(FS), 1);
-                printf("Sent CTRL-\\ to target\n");
-                break;
-
-            case 'q':
-                exit(0);
-
-            case 's':
-                timestamp++;
-                if (timestamp > 2) timestamp = 0;
-                sstat("Timestamps are %s\n");
-                break;
-
-            case 'x':
-                showhex++;
-                if (showhex > 2) showhex = 0;
-                xstat("Hex output is %s\n");
-                break;
+            case 'b': bskey = !bskey; bstat("Backspace key sends %s\n"); break;
+            case 'e': enterkey = !enterkey; estat("Enter key sends %s\n"); break;
+            case 'p': put(target, bytes(FS), 0); printf("Sent ^\\ to target\n"); break;
+            case 'q': exit(0);
+            case 's': if (++timestamp > 2) timestamp = 0; sstat("Timestamp mode is %s\n"); break;
+            case 'x': if (++showhex > 2) showhex = 0; xstat("Hex mode is %s\n"); break;
 
             invalid:
             default:
@@ -577,55 +676,19 @@ void command(void)
 
             case '?':
                 printf("Commands:\n\n");
-                bstat( "    b         - toggle backspace key sends DEL or BS (now %s)\n");
-                estat( "    e         - cycle enter key sends LF, CR, CR+LF, or CR+NUL (now %s)\n");
-                printf("    p         - forward ^\\ to target\n");
+                bstat( "    b         - toggle backspace key (now %s)\n");
+                estat( "    e         - cycle enter key (now %s)\n");
+                printf("    p         - send ^\\ to target\n");
                 printf("    q         - quit\n");
-                sstat( "    s         - cycle timestamps off, on, or on with date (now %s)\n");
-                xstat( "    x         - cycle hex output off, on, or all (now %s)\n");
-                printf("    ! command - pass rest of the line to shell with stdin/stdout connected to target\n");
+                sstat( "    s         - cycle timestamp mode (now %s)\n");
+                xstat( "    x         - cycle hex mode (now %s)\n");
+                printf("    ! command - run shell command with stdin/out connected to target\n");
                 printf("\n");
                 printf("An empty line exits command mode.\n");
                 break;
         }
     }
-    ctty(RAW);
-}
-
-// write encoded character 128-255
-void encode(unsigned int c)
-{
-    static char **table = NULL;
-
-    if (c <= 127 || !encoding) return;         // not specified, ignore
-
-    if (!*encoding) put(console, bytes(c), 1); // empty string, pass verbatim
-
-    if (!table)
-    {
-        // build encode table on the first call
-        table = calloc(128, sizeof(char *));
-        if (!table) die("Out of memory!\n");
-
-        setlocale(LC_CTYPE, "");
-        iconv_t cd = iconv_open("//TRANSLIT", encoding);
-        if (cd != (iconv_t)-1)
-        {
-            int n;
-            for (n = 128; n < 256; n++)
-            {
-                // determine native sequence for each char and save in table
-                char i = n, *in = &i, buf[8], *out = buf;
-                size_t nin = 1, nout = sizeof(buf);
-                if (iconv(cd, &in, &nin, &out, &nout) >= 0 && nout < sizeof(buf))
-                    table[n & 127] = strndup(buf, sizeof(buf) - nout);
-            }
-            iconv_close(cd);
-        }
-        setlocale(LC_CTYPE, "C");
-    }
-
-    put(console, table[c & 127] ?: "?", 0);
+    display(RAW);
 }
 
 int main(int argc, char *argv[])
@@ -634,7 +697,7 @@ int main(int argc, char *argv[])
     {
         case 'b': bskey = 1; break;
         case 'd': dtr = 1; break;
-        case 'e': if (enterkey < 3) enterkey++; break;
+        case 'e': enterkey = 1; break;
         case 'f': teename = optarg; break;
         case 'i': encoding = optarg; break;
         case 'n': native = 1; break;
@@ -643,23 +706,29 @@ int main(int argc, char *argv[])
         case 't': if (telnet < 2) telnet++; break;
         case 'x': if (showhex < 2) showhex++; break;
 
-        case ':':              // missing
-        case '?': die(usage);  // or invalid options
-        case -1: goto optx;    // no more options
+        case ':':                           // missing
+        case '?': die(usage);               // or invalid options
+        case -1: goto optx;                 // no more options
     } optx:
-
     if (optind >= argc) die(usage);
-
     targetname = argv[optind];
-    do_connect();
 
-    if (teename && (!(tee = fopen(teename, "a")))) die("Could not open tee file '%s': %s\n", teename, strerror(errno));
+    display(INIT);                          // initialize console or die
 
-    if (telnet > 1 && enterkey == 0) enterkey = 3; // if not BINARY, default to CR+NUL
+    signal(SIGPIPE, SIG_IGN);               // disable SIGPIPE
 
-    signal(SIGPIPE, SIG_IGN);
+    contact();                              // connect to target
 
-    ctty(RAW); // put console in raw mode
+    if (teename)
+    {
+        // open tee file, sets tee file descriptor global
+        tee = open(teename, O_WRONLY|O_APPEND);
+        if (tee >= 0) write(tee, bytes(LF), 1); // if already exists, add a blank line
+        else if (errno == ENOENT) tee = open(teename, O_WRONLY|O_CREAT); // otherwise create it
+        if (tee < 0) die("Can't open tee file %s: %s\n", teename, strerror(errno));
+    }
+
+    display(RAW);                           // console in raw mode
 
     while(1)
     {
@@ -668,100 +737,62 @@ int main(int argc, char *argv[])
 
         if (p[0].revents)
         {
-            // Process key from console. Note we're inside a loop, break to
-            // skip forwarding the key to the target.
+            // Process key from console
             int c = get(console);
 
             if (c < 0) die("Console error: %s\n", strerror(errno));
 
             switch(c)
             {
-                case FS:
+                case FS:                    // command escape
                     command();
                     break;
 
-                case BS:
+                case BS:                    // backspace sends BS or DEL
                 case DEL:
-                    put(target, bytes(bskey ? DEL: BS), 1);
+                    put(target, bytes(bskey ? DEL : BS), 1);
                     break;
 
-                case LF: // enter key
-                    enter();
+                case LF:                    // enter sends CR or LF
+                    if (enterkey)
+                        put(target, bytes(LF), 1);
+                    else
+                    {
+                        if (telnet > 1) put(target, bytes(CR, NUL), 2); // ASCII telnet needs CR+NUL
+                        else put(target, bytes(CR), 1);
+                    }
                     break;
 
-                case IAC:
-                    if (telnet) put(target, bytes(IAC),  1); // escape 255's if telnet
-                    // fall thru
+                case CR:                    // drop CR
+                case 128 ... 255:           // and high characters
+                    break;
 
-                default:
+                default:                    // send all others
                     put(target, bytes(c), 1);
                     break;
             }
-
         }
 
         if (p[1].revents)
         {
-            // Process character from target. Note we're inside a loop, break to
-            // skip forwarding the character to the console
-
-            // get key from target
+            // Process character from target
             int c = get(target);
 
             if (c < 0)
             {
-                // urk, target dropped
-                ctty(COOKED);
+                // Urk, target dropped
+                display(COOKED);
                 printf("nanocom lost connection to %s\n", targetname);
-                if (!reconnect) exit(1);
-                do_connect();
-                ctty(RAW);
-                if (telnet) iac(-1); // restart IACsn
+                if (!reconnect) exit(1);    // Done unless reconnect is enabled
+                contact();
+                if (telnet) iac(-1);        // reset IAC state machine
+                display(RAW);
                 continue;
             }
 
-            if (telnet && iac(c)) continue;                     // done if key swallowed by telnet IAC
+            if (telnet && iac(c)) continue; // process telnet inband characters
 
-            if (tee) fputc(c, tee);                             // maybe send raw data to the tee
-
-            if (showhex > 1)                                    // show all as hex?
-            {
-                hex(c);
-                clean = 0;
-                continue;
-            }
-
-            switch(c)
-            {
-                case LF:
-                    if (clean && timestamp) stamp(timestamp>1); // LF, maybe timestamp on blank line
-                    put(console, bytes(CR, LF), 2);             // send CR+LF
-                    clean = 1;                                  // we're now at the start of the line
-                    break;
-
-                case CR:
-                    put(console, bytes(CR), 1);                 // just send it
-                    break;
-
-                default:
-                    if (clean && timestamp) stamp(timestamp>1); // timestamp on blank line
-                    clean = 0;                                  // not clean anymore
-
-                    if (showhex && !isprint(c))                 // maybe show unprintable as hex
-                    {
-                        hex(c);
-                        break;
-                    }
-
-                    if (c > 127)                                // maybe output high characters
-                    {
-                        encode(c);
-                        break;
-                    }
-
-                    // send character to console
-                    put(console, bytes(c), 1);
-            }
+            display(c);                     // else display it
         }
     }
     return 0;
