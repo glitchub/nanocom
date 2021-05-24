@@ -13,11 +13,11 @@ Options:
     -b          - backspace key sends DEL instead of BS
     -d          - toggle serial port DTR high on start
     -e          - enter key sends LF instead of CR
-    -f file     - tee displayed output to specified file
+    -f file     - log console output to specified file
+    -h          - display unprintable characters as hex, 2X to display all characters as hex
     -i encoding - encoding for high characters e.g. 'CP437', or '' to display verbatim
     -n          - don't set serial port to 115200 N-8-1, use it as is
     -r          - try to reconnect target if it won't open or closes with error
     -s          - display timestamp, 2X to display with date
     -t          - enable telnet in binary mode, 2X for ASCII mode (handles CR+NUL)
-    -x          - display unprintable chars as hex, 2X for all chars
 
