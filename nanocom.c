@@ -615,7 +615,7 @@ void doconnect()
             if (target < 0) die("Can't create socket: %s\n", strerror(errno));
             if (connect(target, ai->ai_addr, ai->ai_addrlen))
             {
-                if (errno != ECONNREFUSED && errno != ETIMEDOUT) reconnect = 0;
+                if (errno != ECONNREFUSED && errno != ETIMEDOUT && errno != ENETUNREACH) reconnect = 0;
                 target = -1;
             }
             free(host);
