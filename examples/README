@@ -1,0 +1,18 @@
+Nanocom supports running arbitrary shell commands with stdout attached to the
+target device input, stdin attached to the target device output, and stderr
+attached to the terminal.
+
+Characters output by the shell command to stderr will appear on the terminal.
+Each line is prefaced with a '|' character to indicate that it is shell command
+output.
+
+Keys typed to the terminal will be sent to the shell command's stderr. The
+exception is the ^] key which brings up the nanocom menu in the usual way. Note
+^C and so forth are sent to the shell command, which may or may not ignore
+them. However menu command 'x' will always kill a running shell command.
+
+This allows programs such as 'sz' to work in a natural way, it also allows
+creation of scripts tt can interact with the user and the target device to
+perform various operations.
+
+Included in this directory ar example shell and expect scripts.

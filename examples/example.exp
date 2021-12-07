@@ -1,0 +1,17 @@
+# Example script for nanocom shell command, run with:
+#
+#  ^]x expect example.exp
+#
+# The target device is accessed via stdin and stdout, the terminal via stderr.
+
+# Mirror all target input/output to the console.
+log_file -noappend -a /dev/fd/2
+
+puts stderr "Listing current directory..."
+
+# Send the ls command to the target on stdout, then slurp (and log) stdin until
+# lines stop coming.
+send "ls -al\r"
+expect -timeout 1 "\n" exp_continue
+
+puts stderr "\nBye!"

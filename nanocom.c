@@ -4,30 +4,44 @@
 // This software is released as-is into the public domain, as described at
 // https://unlicense.org. Do whatever you like with it.
 
-#define usage "\
-Usage:\n\
-\n\
-    nanocom [options] /dev/ttyX|host:port\n\
-\n\
-Connect current tty to specified target, which is either a serial device (if\n\
-target contains a '/') or a TCP host (if target contains a ':').\n\
-\n\
-Options:\n\
-\n\
-    -b          - backspace key sends DEL instead of BS\n\
-    -d          - toggle serial port DTR high on start\n\
-    -e          - enter key sends LF instead of CR\n\
-    -f file     - log console output to specified file\n\
-    -h          - display unprintable characters as hex, 2X to display all characters as hex\n\
-    -i encoding - encoding for high characters e.g. 'CP437', or '' to display verbatim\n\
-    -n          - don't set serial port to 115200 N-8-1, use it as is\n\
-    -r          - try to reconnect target if it won't open or closes with error\n\
-    -s          - display timestamp, 2X to display with date\n\
-    -t          - enable telnet in binary mode, 2X for ASCII mode (handles CR+NUL)\n\
-\n\
-"
+char *usage = "Usage:\n"
+              "\n"
+#if NETWORK
+              "    nanocom [options] /dev/ttyX|host:port\n"
+              "\n"
+              "Connect current tty to specified target, which is either a serial device (if\n"
+              "target contains a '/') or a TCP host (if target contains a ':').\n"
+#else
+              "    nanocom [options] /dev/ttyX\n"
+              "\n"
+              "Connect current tty to specified serial device.\n"
+#endif
+              "\n"
+              "Options:\n"
+              "\n"
+              "    -b          - backspace key sends DEL instead of BS\n"
+              "    -d          - toggle serial port DTR high on start\n"
+              "    -e          - enter key sends LF instead of CR\n"
+              "    -f file     - log console output to specified file\n"
+              "    -h          - display unprintable characters as hex, 2X to display all characters as hex\n"
+#if TRANSLIT
+              "    -i encoding - encoding for high characters e.g. 'CP437', or '' to display verbatim\n"
+#endif
+              "    -k          - with -f, also log key presses\n"
+              "    -n          - don't set serial port to 115200 N-8-1, use it as is\n"
+              "    -r          - try to reconnect target if it won't open or closes with error\n"
+              "    -s          - display timestamp, 2X to display with date\n"
+#if TELNET
+              "    -t          - enable telnet in binary mode, 2X for ASCII mode (handles CR+NUL)\n"
+#endif
+#if SHELLCMD
+              "    -x command  - try to execute command string after first connect\n"
+#endif
+              ;
 
+#ifdef SHELLCMD
 #define _GNU_SOURCE // for pipe2()
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -43,12 +57,18 @@ Options:\n\
 #include <time.h>
 #include <ctype.h>
 #include <sys/wait.h>
+#if NETWORK
 #include <sys/socket.h>
 #include <netdb.h>
+#endif
 #include <poll.h>
+#if TRANSLIT
 #include <iconv.h>
 #include <locale.h>
+#endif
+#if SHELLCMD
 #include <pty.h>
+#endif
 
 // ASCII controls of interest
 #define NUL 0
@@ -72,14 +92,24 @@ int bskey = 0;                  // 1 = send DEL for BS
 int native = 0;                 // 1 = don't force serial 115200 N81
 int timestamp = 0;              // 1 = show time, 2 = show date and time
 int dtr = 0;                    // 1 = twiddle serial DTR on connect
+int logkeys = 0;                // 1 = also log key presses (if tee is enabled)
+#if TRANSLIT
 char *encoding = NULL;          // encoding name (see iconv -l)
+#endif
+#if TELNET
 int telnet = 0;                 // 1 = BINARY telnet, 2 = ASCII telnet
+#endif
+#if SHELLCMD
+char *startup = NULL;           // initial shell command to run
+#endif
 
 // Other globals
-int target = -1;                // target device or socket, if >= 0
-int teefd = -1;                 // tee file descriptor, if >= 0
+int target = 0;                 // target device or socket, if > 0
+int teefd = 0;                  // tee file descriptor, if > 0
 struct termios cooked;          // initial cooked console termios
+#if SHELLCMD
 char *running = NULL;           // name of currently running shell command or NULL, affects display() and command()
+#endif
 
 #define console 1               // Assume stdin is the console device
 
@@ -96,6 +126,23 @@ void recook(void) { display(RECOOK); }
 
 // restore console to cooked mode and die
 #define die(...) recook(), fprintf(stderr, __VA_ARGS__), exit(1)
+
+// Put character(s) to file descriptor, if size is 0 use strlen(s). Return -1
+// on unrecoverable error.
+#define bytes(...) (unsigned char []){__VA_ARGS__}  // define an array of bytes
+int put(int fd, const void *s, size_t size)
+{
+    if (!s) return 0;                                       // ignore NULL
+    if (!size) size = strlen(s);                            // get size
+    while (size)
+    {
+        int n = write(fd, s, size);
+        if (n < 0) return -1;
+        size -= n;
+        s += n;
+    }
+    return 0;
+}
 
 typedef struct
 {
@@ -158,6 +205,27 @@ int dequeue(queue *q, int fd)
     return r;
 }
 
+// Same as dequeue but also log as keys
+int dekey(queue *q, int fd)
+{
+    if (!teefd || !logkeys) return dequeue(q, fd);
+    void *p;
+    int n = getq(q, &p);
+    if (!n) return 0;
+    int i = 0;
+    for (; i < n; i++)
+    {
+        int r = write(fd, p+i, 1);
+        if (r < 0) return r;
+        if (!r) break;
+        char s[10];
+        sprintf(s, "[key %02X]", *(unsigned char *)(p+i));
+        put(teefd, s, 8);
+    }
+    if (i) delq(q, i);
+    return i;
+}
+
 // Mark file descriptor as non-blocking
 #define nonblocking(fd) if (fcntl(fd, F_SETFL, O_NONBLOCK)) die("fcntl %d failed: %s\n", fd, strerror(errno))
 
@@ -171,23 +239,6 @@ int await(int fd, int events, int timeout)
     if (!r) return 0;
     if (r == 1 && p.revents & events) return p.revents & events;
     return -1;
-}
-
-// Put character(s) to file descriptor, if size is 0 use strlen(s). Return -1
-// on unrecoverable error.
-#define bytes(...) (unsigned char []){__VA_ARGS__}  // define an array of bytes
-int put(int fd, const void *s, size_t size)
-{
-    if (!s) return 0;                                       // ignore NULL
-    if (!size) size = strlen(s);                            // get size
-    while (size)
-    {
-        int n = write(fd, s, size);
-        if (n < 0) return -1;
-        size -= n;
-        s += n;
-    }
-    return 0;
 }
 
 // Return character from raw console, 0 if timeout, or die
@@ -210,7 +261,10 @@ void display(int c)
 {
     // Current mode, 0 if uninitialized
     static int mode = 0;
+
+#if TRANSLIT
     static char **strings = NULL;   // table of 128 strings
+#endif
 
     // RAW cursor state: 0=clean, 1=dirty, 2=dirty with deferred CR
     static int dirty = 0;
@@ -219,13 +273,15 @@ void display(int c)
     void putcon(const void *s, size_t size)
     {
         put(console, s, size);
-        if (teefd >= 0) put(teefd, s, size);
+        if (teefd) put(teefd, s, size);
     }
 
     // put start of new line
     void startline(void)
     {
+#if SHELLCMD
         if (running) { putcon("| ", 0); dirty = 1; }        // indicate shell command output
+#endif
         if (!timestamp) return;
         struct timeval t;
         gettimeofday(&t, NULL);                             // get current time
@@ -239,15 +295,28 @@ void display(int c)
     void putLF(void)
     {
         put(console, bytes(CR, LF), 2);                     // CRLF to console
-        if (teefd >= 0) put(teefd, bytes(LF), 1);           // LF to the tee
+        if (teefd) put(teefd, bytes(LF), 1);                // LF to the tee
         dirty = 0;                                          // not dirty
     }
 
     void putCR(void)
     {
         put(console, bytes(CR), 1);                         // CR to the console
-        if (teefd >= 0) put(teefd, bytes(LF), 1);           // but LF to the tee
+        if (teefd) put(teefd, bytes(LF), 1);                // but LF to the tee
         startline();                                        // maybe (re)timestamp
+    }
+
+    int puthex(int c)
+    {
+#if SHELLCMD
+        if (running) return 0;                              // never hex shell output
+#endif
+        if (!showhex) return 0;                             // done if hex not enabled
+        char s[5];
+        sprintf(s, "[%.2X]", c & 0xff);                     // show "[XX]"
+        putcon(s, 4);
+        dirty = 1;
+        return 1;                                           // note slurped
     }
 
     if (c == RECOOK)                                        // we're exiting, restore cooked if necessary
@@ -259,11 +328,12 @@ void display(int c)
     if (!mode)                                              // perform one-time init
     {
         tcgetattr(console, &cooked);                        // save current console config
+#if TRANSLIT
         if (encoding && *encoding)
         {
             // create table of strings for high characters
             strings = calloc(128, sizeof(char *));
-            if (!strings) die("Out of memory");
+            if (!strings) die("%s\n", "Out of memory");
             setlocale(LC_CTYPE, "");
             iconv_t cd = iconv_open("//TRANSLIT", encoding);
             if (cd == (iconv_t)-1) die("Invalid encoding '%s' (try 'iconv -l' for a list)\n", encoding);
@@ -277,11 +347,12 @@ void display(int c)
                 if (iconv(cd, &in, &nin, &out, &nout) < 0) die("iconv failed: %s\n", strerror(errno));
                 nout = sizeof(str) - nout;
                 strings[n & 127] = nout ? strndup(str, nout) : "?";;
-                if (!strings[n & 127]) die("Out of memory");
+                if (!strings[n & 127]) die("%s\n", "Out of memory");
             }
             iconv_close(cd);
             setlocale(LC_CTYPE, "C");
         }
+#endif
         atexit(recook);                                     // restore cooked on unexpected exit
         mode = COOKED;                                      // we are now in COOKED mode
     }
@@ -322,7 +393,7 @@ void display(int c)
     // Here, handle valid characters in RAW mode
     if (mode != RAW || c > 255) return;                     // done if not
 
-    if (!running && showhex > 1) goto hex;                  // maybe show as hex
+    if (showhex > 1 && puthex(c)) return;                   // done if show all as hex
 
     switch(c)
     {
@@ -332,14 +403,14 @@ void display(int c)
             return;
 
         case CR:                                            // CR
-            if (!running && showhex) goto hex;              // maybe hex
+            if (puthex(c)) return;                          // done if shown as hex
             if (dirty) dirty = 2;                           // ignore if clean else defer until next
             return;
 
         case TAB:                                           // various printables
         case FF:
         case ESC:
-            if (!running && showhex) goto hex;              // maybe hex
+            if (puthex(c)) return;                          // done if shown as hex
             // fall through
         case BS:
         case 32 ... 126:
@@ -348,25 +419,24 @@ void display(int c)
             break;
 
         case 128 ... 255:                                   // high characters
+#if SHELLCMD
             if (running) break;                             // shell output displays verbatim
-            if (showhex) goto hex;                          // maybe hex
-            if (!encoding) return;                          // ignore if not encoding
-            if (!dirty) startline();                        // timestamp a blank line
-            else if (dirty > 1) putCR();                    // or CR if deferred
-            if (!*encoding) break;                          // -i'' was specified, just go display
-            putcon(strings[c & 127], 0);                    // else put encoded string
-            dirty = 1;
-            return;
-
-        default:                                            // all others, ignore except hex
-            if (!running && showhex)
+#endif
+            if (puthex(c)) return;                          // done if shown as hex
+#if TRANSLIT
+            if (encoding)
             {
-                char s[5];
-                hex:
-                sprintf(s, "[%.2X]", c & 0xff);
-                putcon(s, 0);
+                if (!dirty) startline();                    // timestamp a blank line
+                else if (dirty > 1) putCR();                // or CR if deferred
+                if (!*encoding) break;                      // -i'' was specified, just go display
+                putcon(strings[c & 127], 0);                // else put encoded string
                 dirty = 1;
             }
+#endif
+            return;
+
+        default:                                            // all others
+            puthex(c);                                      // maybe show hex
             return;
     }
 
@@ -375,6 +445,7 @@ void display(int c)
     dirty = 1;
 }
 
+#if TELNET
 // Magic telnet IAC characters, these are also used as states
 #define SB 250      // IAC SB = start suboption
 #define SE 240      // IAC SE = end suboption
@@ -550,6 +621,7 @@ int iac(int c)
     }
     return -1; // character is swalloed
 }
+#endif
 
 // Connect or reconnect to specified targetname and set the 'target' file
 // descriptor. Targetname can be in form "host:port" or "/dev/ttyXXX".
@@ -557,7 +629,7 @@ void doconnect()
 {
     int first = 1;
 
-    if (target >= 0)
+    if (target)
     {
         // target is already open, report drop
         printf("| Lost connection to %s\n", targetname);
@@ -568,11 +640,14 @@ void doconnect()
 
     while (1)
     {
+#if NETWORK
         if (strchr(targetname, '/'))
         {
+#endif
             // "/dev/ttyXXX"
             target = open(targetname, O_RDWR|O_NOCTTY|O_CLOEXEC);
-            if (target >= 0)
+            if (!target) die("Target file opened as fd 0?\n");
+            if (target > 0)
             {
                 // make sure it's raw
                 struct termios io;
@@ -601,6 +676,7 @@ void doconnect()
 
                 break;
             }
+#if NETWORK
         }
         else if (strchr(targetname, ':'))
         {
@@ -612,6 +688,7 @@ void doconnect()
             int res = getaddrinfo(host, port, &hints, &ai);
             if (res) die("Can't resolve %s: %s\n", targetname, gai_strerror(res));
             target = socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol);
+            if (!target) die("Target socket opened as fd 0?\n");
             if (target < 0) die("Can't create socket: %s\n", strerror(errno));
             if (connect(target, ai->ai_addr, ai->ai_addrlen))
             {
@@ -620,9 +697,10 @@ void doconnect()
             }
             free(host);
             freeaddrinfo(ai);
-            if (target >= 0) break;
+            if (target > 0) break;
         }
         else die("%s must contain '/' or ':'\n", targetname);
+#endif
 
         // connect failed
         if (first) printf("| Can't connect to %s: %s\n", targetname, strerror(errno));
@@ -635,23 +713,32 @@ void doconnect()
 
     nonblocking(target);        // make sure target is non-blocking
     delq(&qtarget, -1);         // empty qtarget
+#if TELNET
     iac(-1);                    // init telnet
+#endif
 
     printf("| Connected to %s, command key is ^\\.\n", targetname);
 }
 
 int command(void);
 
-// Prompt for shell command and run with stdin/stdout attached to target and stderr attached to console.
-void run(void)
+#if SHELLCMD
+// Run specified shell command with stdin/stdout attached to target and stderr attached to console.
+// If command is NULL, prompt for it.
+void run(char *cmd)
 {
     display(WARM);
     char buf[256];
-    printf("| Enter a shell command to run with stdin/stdout attached to target and stderr attached to console.\n");
-    if (getcwd(buf, 255)) printf("| Current directory is %s\n", buf);
-    printf("| > ");
-    fgets(buf, sizeof(buf), stdin);
-    char *cmd = strchr(buf, 0);                 // delete trailing whitespace
+    if (cmd)
+        snprintf(buf, sizeof(buf), "%s", cmd);
+    else
+    {
+        printf("| Enter a shell command to run with stdin/stdout attached to target and stderr attached to console.\n");
+        printf("| %s> ", getcwd(buf, sizeof(buf)) ? buf : "");
+        fgets(buf, sizeof(buf), stdin);
+    }
+
+    cmd = strchr(buf, 0);                       // delete trailing whitespace
     while (cmd > buf && isspace(*(cmd-1))) cmd--;
     *cmd = 0;
     cmd = buf;                                  // and leading whitespace
@@ -672,22 +759,14 @@ void run(void)
         ws.ws_col -= 28; // parent may prepend "| " and a timestamp
 
         // shell gets a cooked pty to use for stderr
-        int cmderr, pty;
-        if (openpty(&cmderr, &pty, NULL, &cooked, &ws)) die("Can't create pty: %s\n", strerror(errno));
-
-        int pid = fork();
-        if (pid < 0) die("Can't fork: %s\n", strerror(errno));
+        int cmderr;
+        int pid = forkpty(&cmderr, NULL, &cooked, &ws);
+        if (pid < 0) die("Can't forkpty: %s\n", strerror(errno));
         if (!pid)
         {
             // child
             dup2(rend(cmdin), 0);               // stdin is the read end of the input pipe
             dup2(wend(cmdout), 1);              // stdout is the write end of output pipe
-            dup2(pty, 2);                       // stderr is the pty
-            close(cmderr);                      // close the extra ttys
-            close(pty);                         // (everything else has F_CLOEXEC)
-            // set the controlling terminal
-            if (setsid() == -1) die("setsid() failed: %s\n", strerror(errno));
-            if (ioctl(2, TIOCSCTTY, NULL) < 0) die("TIOCSCTTY failed: %s\n", strerror(errno));
             fprintf(stderr, "Running shell command '%s'...\n", cmd);
             execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
         }
@@ -695,7 +774,6 @@ void run(void)
         // parent
         close(rend(cmdin));                     // close child's pipe ends
         close(wend(cmdout));
-        close(pty);
         nonblocking(rend(cmdout));              // make our ends non-blocking
         nonblocking(wend(cmdin));
         nonblocking(cmderr);
@@ -716,9 +794,12 @@ void run(void)
             int n = read(rend(cmdout), bf, sizeof bf);
             for (int i = 0; i < n; i++)
             {
+#if TELNET
                 if (telnet && bf[i] == IAC) putq(&qtarget, bytes(IAC, IAC), 2);
                 else if (telnet > 1 && bf[i] == CR) putq(&qtarget, bytes(CR, NUL), 2);
-                else putq(&qtarget, &bf[i], 1);
+                else
+#endif
+                putq(&qtarget, &bf[i], 1);
                 tx++;
             }
             return n;
@@ -763,7 +844,7 @@ void run(void)
                     }
                     if (!r) c = 0;      // discard
                 }
-                if (c && put(cmderr, bytes(c), 1) != 1) break;
+                if (c && put(cmderr, bytes(c), 1) != 0) break;
             }
 
             if (p[2].revents)
@@ -773,7 +854,9 @@ void run(void)
                 int n = read(target, bf, sizeof bf);
                 if (n <= 0) break;
                 for (int i = 0; i < n; i++)
+#if TELNET
                     if (!iac(bf[i]))
+#endif
                         putq(&qcmdin, bf+i, 1);
             }
 
@@ -781,8 +864,8 @@ void run(void)
 
             if (p[4].revents)
             {
-                // qtarget to target
-                if (dequeue(&qtarget, target) <= 0) break;
+                // qtarget to target, maybe logged as keys
+                if (dekey(&qtarget, target) <= 0) break;
             }
 
             if (p[5].revents)
@@ -837,10 +920,12 @@ void run(void)
     }
     display(RAW); // back to raw mode
 }
+#endif
 
 void bstat(void) { printf("| Backspace key sends %s.\n", bskey ? "DEL" : "BS"); }
 void estat(void) { printf("| Enter key sends %s.\n", enterkey ? "LF" : "CR"); }
 void hstat(void) { printf("| %s characters are shown as hex.\n", (showhex > 1) ? "All" : (showhex ? "Unprintable" : "No")); }
+void kstat(void) { printf("| Key logging is %s.\n", logkeys ? "on" : "off" ); }
 void rstat(void) { printf("| Automatic reconnect is %s.\n", reconnect ? "on" : "off"); }
 void sstat(void) { printf("| Timestamps are %s.\n", (timestamp > 1) ? "on, with date" : (timestamp ? "on" : "off") ); }
 
@@ -860,38 +945,57 @@ int command(void)
     {
         case 'b': bskey = !bskey; bstat(); break;
         case 'e': enterkey = !enterkey; estat(); break;
+#if SHELLCMD
         case 'f': ret = 1; break; // tell caller to forward the key
+#endif
         case 'h': showhex = (showhex + 1) % 3; hstat(); break;
+        case 'k': if (teefd) logkeys = !logkeys, kstat(); break;
         case 'q': display(COOKED); exit(0);
         case 'r': reconnect = !reconnect; rstat(); break;
         case 's': timestamp = (timestamp + 1) % 3; sstat(); break;
-        case 'x': if (running) ret = -1; else run(); break;
+#if SHELLCMD
+        case 'x': if (running) ret = -1; else run(NULL); break;
+#endif
         case '?':
             printf("| Connected to %s.\n", targetname);
+#if SHELLCMD
             if (running) printf("| Running shell command '%s'.\n", running);
+#endif
+#if TELNET
             if (telnet) printf("| Telnet is enabled in %s mode.\n", telnet == 1 ? "binary" : "ASCII");
-            if (teename) printf("| Console output is logged to %s.\n", teename);
+#endif
+            if (teefd)
+            {
+                printf("| Console output is logged to %s.\n", teename);
+                kstat();
+            }
             bstat();
             estat();
             if (showhex) hstat();
+#if TRANSLIT
             else if (encoding) printf("| High characters are encoded as %s.\n", *encoding ? encoding : "raw bytes");
+#endif
             if (reconnect) rstat();
             if (timestamp) sstat();
             printf("|\n"
                    "| The following keys are supported after ^\\:\n"
                    "|    b - toggle backspace key between BS and DEL.\n"
-                   "|    e - toggle enter key between CR and LF.\n"
-                   "|    f - forward ^\\ to %s.\n"
-                   "|    h - cycle hex output off, unprintable, or all.\n"
-                   "|    q - close connection and quit.\n"
+                   "|    e - toggle enter key between CR and LF.\n");
+#ifdef SHELLCMD
+            printf("|    f - forward ^\\ to %s.\n", running ? "shell command" : "target");
+#endif
+            printf("|    h - cycle hex output off, unprintable, or all.\n");
+            if (teename) {
+            printf("|    k - toggle key logging on or off.\n");
+            }
+            printf("|    q - close connection and quit.\n"
                    "|    r - toggle automatic reconnect.\n"
-                   "|    s - cycle timestamps off, on, or on with date.\n"
-                   "|    x - %s.\n"
-                   "|\n"
-                   "| Hit any key to continue...",
-                    running ? "shell command" : "target",
-                    running ? "kill running shell command" : "run a shell command"
-                  );
+                   "|    s - cycle timestamps off, on, or on with date.\n");
+#ifdef SHELLCMD
+            printf("|    x - %s.\n", running ? "kill running shell command" : "run a shell command");
+#endif
+            printf("|\n"
+                   "| Hit any key to continue...");
             display(RAW);
             key(5000); // wait 5 seconds
             display(LF);
@@ -903,24 +1007,30 @@ int command(void)
 
 int main(int argc, char *argv[])
 {
-    while (1) switch (getopt(argc,argv,":bdef:hi:nrstx"))
+    while (1) switch (getopt(argc,argv,":bdef:hi:knrstx:"))
     {
         case 'b': bskey = 1; break;
         case 'd': dtr = 1; break;
         case 'e': enterkey = 1; break;
         case 'f': teename = optarg; break;
-        case 'x': // legacy, fall thru
         case 'h': if (showhex < 2) showhex++; break;
+#if TRANSLIT
         case 'i': encoding = optarg; break;
+#endif
+        case 'k': logkeys = 1; break;
         case 'n': native = 1; break;
         case 'r': reconnect = 1; break;
         case 's': if (timestamp < 2) timestamp++; break;
+#if TELNET
         case 't': if (telnet < 2) telnet++; break;
-
+#endif
+#if SHELLCMD
+        case 'x': startup = optarg; break;
+#endif
         case -1: goto optx;                 // no more options
-        default: die(usage);                // invalid options
+        default: die("%s\n", usage);        // invalid options
     } optx:
-    if (optind >= argc) die(usage);
+    if (optind >= argc) die("%s\n", usage);
     targetname = argv[optind];
 
     signal(SIGPIPE, SIG_IGN);               // ignore broken pipe
@@ -931,14 +1041,21 @@ int main(int argc, char *argv[])
     {
         display(COOKED);
         doconnect();                        // connect (or reconnect) to target, or die
-        if (teename && teefd < 0)           // open tee file if not already
+        if (teename && !teefd)              // open tee file if not already
         {
             teefd = open(teename, O_WRONLY|O_APPEND|O_CLOEXEC);
-            if (teefd >= 0) write(teefd, bytes(LF), 1); // if already exists, add a blank line
+            if (teefd > 0) write(teefd, bytes(LF), 1); // if already exists, add a blank line
             else if (errno == ENOENT) teefd = open(teename, O_WRONLY|O_CREAT|O_CLOEXEC, 0644); // otherwise create it
+            if (!teefd) die("Tee file opened as fd 0?\n");
             if (teefd < 0) die("Can't open tee file %s: %s\n", teename, strerror(errno));
         }
         display(RAW);
+        if (startup)
+        {
+            // run startup command
+            run(startup);
+            startup = NULL; // only once
+        }
 
         while(1)
         {
@@ -967,9 +1084,11 @@ int main(int argc, char *argv[])
                         if (enterkey)
                             putq(&qtarget, bytes(LF), 1);
                         else
+#if TELNET
                         if (telnet > 1)         // ASCII telnet needs CR+NUL
                             putq(&qtarget, bytes(CR, NUL), 2);
                         else
+#endif
                             putq(&qtarget, bytes(CR), 1);
                         break;
 
@@ -991,12 +1110,14 @@ int main(int argc, char *argv[])
                 int n = read(target, bf, sizeof bf);
                 if (n <= 0) break;              // assume dropped if errorr
                 for (int i = 0; i < n; i++)     // for each char
+#if TELNET
                     if (!iac(bf[i]))            // if not slurped by telnet
+#endif
                         display(bf[i]);         // display it
             }
 
-            // send qtarget if target writable
-            if (p[2].revents && dequeue(&qtarget, target) <= 0) break;
+            // send qtarget if target writable, maybe logged as keys
+            if (p[2].revents && dekey(&qtarget, target) <= 0) break;
         }
     }
 }
