@@ -28,6 +28,7 @@ char *usage = "Usage:\n"
               "    -i encoding - encoding for high characters e.g. 'CP437', or '' to display verbatim\n"
 #endif
               "    -k          - with -f, also log key presses\n"
+              "    -l mS       - flush characters after connect until idle for specified milliseconds\n"
               "    -n          - don't set serial port to 115200 N-8-1, use it as is\n"
               "    -r          - try to reconnect target if it won't open or closes with error\n"
               "    -s          - display timestamp, 2X to display with date\n"
@@ -93,6 +94,7 @@ int native = 0;                 // 1 = don't force serial 115200 N81
 int timestamp = 0;              // 1 = show time, 2 = show date and time
 int dtr = 0;                    // 1 = twiddle serial DTR on connect
 int logkeys = 0;                // 1 = also log key presses (if tee is enabled)
+int flush = 0;                  // mS to flush characters after first connect
 #if TRANSLIT
 char *encoding = NULL;          // encoding name (see iconv -l)
 #endif
@@ -712,6 +714,14 @@ void doconnect()
     }
 
     nonblocking(target);        // make sure target is non-blocking
+
+    if (flush > 0) while (await(target, POLLIN, flush) > 0)
+    {
+        char fb[1024];
+        if (read(target, fb, sizeof(fb)) <= 0) break;
+    }
+    flush = 0;                  // first time only
+
     delq(&qtarget, -1);         // empty qtarget
 #if TELNET
     iac(-1);                    // init telnet
@@ -1007,7 +1017,7 @@ int command(void)
 
 int main(int argc, char *argv[])
 {
-    while (1) switch (getopt(argc,argv,":bdef:hi:knrstx:"))
+    while (1) switch (getopt(argc,argv,":bdef:hi:kl:nrstx:"))
     {
         case 'b': bskey = 1; break;
         case 'd': dtr = 1; break;
@@ -1018,6 +1028,7 @@ int main(int argc, char *argv[])
         case 'i': encoding = optarg; break;
 #endif
         case 'k': logkeys = 1; break;
+        case 'l': flush = atoi(optarg); break;
         case 'n': native = 1; break;
         case 'r': reconnect = 1; break;
         case 's': if (timestamp < 2) timestamp++; break;
