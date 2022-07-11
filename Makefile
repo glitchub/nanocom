@@ -1,4 +1,9 @@
-CFLAGS = -Wall -Werror -Os -s
+CFLAGS = -Wall -Werror -s
+LDFLAGS =
+
+# comment in one of these
+CFLAGS += -O3 # faster
+# CFLAGS += -Os # smaller
 
 # comment out to disable network support
 CFLAGS += -DNETWORK
@@ -10,12 +15,14 @@ CFLAGS += -DTELNET
 CFLAGS += -DTRANSLIT
 
 # comment out to disable shell command support
-CFLAGS += -DSHELLCMD -lutil
+CFLAGS += -DSHELLCMD
+LDFLAGS += -lutil
 
-# Comment in for older gcc
+# comment/uncomment as needed to make your gcc happy
 # CFLAGS += -std=gnu11
+CFLAGS += -Wno-unused-result
 
-nanocom: nanocom.c Makefile; $(CC) $(CFLAGS) $< -o $@
+nanocom: nanocom.c Makefile; $(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 .PHONY: clean
 clean:; rm -f nanocom

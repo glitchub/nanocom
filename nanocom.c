@@ -19,6 +19,7 @@ char *usage = "Usage:\n"
               "\n"
               "Options:\n"
               "\n"
+              "    -a          - rate-limit transmit to one character per millisecond\n"
               "    -b          - backspace key sends DEL instead of BS\n"
               "    -d          - toggle serial port DTR high on start\n"
               "    -e          - enter key sends LF instead of CR\n"
@@ -104,6 +105,7 @@ int telnet = 0;                 // 1 = BINARY telnet, 2 = ASCII telnet
 #if SHELLCMD
 char *startup = NULL;           // initial shell command to run
 #endif
+int ratelimit = 0;              // 1 = rate-limit transmit to one character per millisecond
 
 // Other globals
 int target = 0;                 // target device or socket, if > 0
@@ -128,6 +130,14 @@ void recook(void) { display(RECOOK); }
 
 // restore console to cooked mode and die
 #define die(...) recook(), fprintf(stderr, __VA_ARGS__), exit(1)
+
+// Return monotonic nanoseconds since boot
+int64_t nS(void)
+{
+    struct timespec t;
+    if (clock_gettime(CLOCK_MONOTONIC, &t)) die("clock_gettime failed: %s\n", strerror(errno));
+    return ((int64_t)t.tv_sec * 1000*1000*1000) + t.tv_nsec;
+}
 
 // Put character(s) to file descriptor, if size is 0 use strlen(s). Return -1
 // on unrecoverable error.
@@ -207,24 +217,55 @@ int dequeue(queue *q, int fd)
     return r;
 }
 
-// Same as dequeue but also log as keys
-int dekey(queue *q, int fd)
+// Perform poll wait on specified pollfd, where the final entry is specifically for pending target fd. If ratelimiting
+// enabled, ignore pending target until ratenext expires.
+int64_t ratenext = 0; // time when next key can send
+int ratepoll(struct pollfd *p, int n)
 {
-    if (!teefd || !logkeys) return dequeue(q, fd);
+    if (ratelimit && ratenext)
+    {
+        int64_t remaining = ratenext - nS();
+        if (remaining > 0 && remaining < 1000000)
+        {
+            struct timespec t = {0, remaining};
+            int r = ppoll(p, n-1, &t, NULL);  // not the last vector
+            if (r) return r;
+        }
+    }
+    // here, not ratelimiting or timeout
+    ratenext = 0;
+    return poll(p, n, -1); // all vectors
+
+}
+
+// Dequeue keys from qtarget to target, possibly with logging, and return number of characters sent, or <0 if error.
+// If ratelimiting, only dequeue 1 key and set ratenext for ratepoll()
+int dekey(void)
+{
+    if (!ratelimit && (!teefd || !logkeys))       // nothing special
+        return dequeue(&qtarget, target);   // dequeue the entire thing
     void *p;
-    int n = getq(q, &p);
+    int n = getq(&qtarget, &p);
     if (!n) return 0;
+    if (ratelimit)
+    {
+        n = 1;                      // only 1 if rate-limited
+        ratenext = nS() + 1000000;  // allow next in 1 mS
+    }
     int i = 0;
     for (; i < n; i++)
     {
-        int r = write(fd, p+i, 1);
+        int r = write(target, p+i, 1);
         if (r < 0) return r;
         if (!r) break;
-        char s[10];
-        sprintf(s, "[key %02X]", *(unsigned char *)(p+i));
-        put(teefd, s, 8);
+        if (logkeys)
+        {
+            char s[10];
+            sprintf(s, "[key %02X]", *(unsigned char *)(p+i));
+            put(teefd, s, 8);
+        }
     }
-    if (i) delq(q, i);
+    delq(&qtarget, i);
     return i;
 }
 
@@ -832,10 +873,10 @@ void run(char *cmd)
                                   { .fd = console, .events = POLLIN },                                  // console to cmderr
                                   { .fd = qcmdin.count < 4096 ? target : -1, .events = POLLIN },        // target to qcmdin, only if space
                                   { .fd = qtarget.count < 4096 ? rend(cmdout) : -1, .events = POLLIN }, // cmdout to qtarget, only if space
-                                  { .fd = qtarget.count ? target : -1, .events = POLLOUT },             // qtarget to target, only if something in qtarget
-                                  { .fd = qcmdin.count ? wend(cmdin) : -1, .events = POLLOUT } };       // qcmdin to cmdin, only if something in qcmdin
+                                  { .fd = qcmdin.count ? wend(cmdin) : -1, .events = POLLOUT },         // qcmdin to cmdin, only if something in qcmdin
+                                  { .fd = qtarget.count ? target : -1, .events = POLLOUT } };           // qtarget to target, only if something in qtarget (must be last)
 
-            int r = poll(p, 6, -1);
+            int r = ratepoll(p, 6);
             if (r <= 0) break;
 
             if (p[0].revents && cmderr2console() <= 0) break; // cmderr to console
@@ -874,17 +915,18 @@ void run(char *cmd)
 
             if (p[4].revents)
             {
-                // qtarget to target, maybe logged as keys
-                if (dekey(&qtarget, target) <= 0) break;
-            }
-
-            if (p[5].revents)
-            {
                 // qcmdin to cmdin
                 int n = dequeue(&qcmdin, wend(cmdin));
                 if (n <= 0) break;
                 rx += n;
             }
+
+            if (p[5].revents)
+            {
+                // qtarget to target, maybe logged as keys
+                if (dekey() <= 0) break;
+            }
+
         }
 
         // here, I/O error (possibly because of child exit) or abort.
@@ -932,6 +974,7 @@ void run(char *cmd)
 }
 #endif
 
+void astat(void) { printf("| Transmit rate limiting is %s.\n", ratelimit ? "on" : "off" ); }
 void bstat(void) { printf("| Backspace key sends %s.\n", bskey ? "DEL" : "BS"); }
 void estat(void) { printf("| Enter key sends %s.\n", enterkey ? "LF" : "CR"); }
 void hstat(void) { printf("| %s characters are shown as hex.\n", (showhex > 1) ? "All" : (showhex ? "Unprintable" : "No")); }
@@ -953,6 +996,7 @@ int command(void)
     printf("%c\n", (c >= ' ' && c <= '~') ? c : 0);
     switch(c)
     {
+        case 'a': ratelimit = !ratelimit; astat(); break;
         case 'b': bskey = !bskey; bstat(); break;
         case 'e': enterkey = !enterkey; estat(); break;
 #if SHELLCMD
@@ -979,6 +1023,7 @@ int command(void)
                 printf("| Console output is logged to %s.\n", teename);
                 kstat();
             }
+            if (ratelimit) astat();
             bstat();
             estat();
             if (showhex) hstat();
@@ -989,6 +1034,7 @@ int command(void)
             if (timestamp) sstat();
             printf("|\n"
                    "| The following keys are supported after ^\\:\n"
+                   "|    a - toggle transmit rate limiting on or off.\n"
                    "|    b - toggle backspace key between BS and DEL.\n"
                    "|    e - toggle enter key between CR and LF.\n");
 #ifdef SHELLCMD
@@ -1008,7 +1054,9 @@ int command(void)
                    "| Hit any key to continue...");
             display(RAW);
             key(5000); // wait 5 seconds
-            display(LF);
+            display(COOKED);
+            printf("\n");
+            display(RAW);
             break;
     }
     display(RAW);
@@ -1017,8 +1065,9 @@ int command(void)
 
 int main(int argc, char *argv[])
 {
-    while (1) switch (getopt(argc,argv,":bdef:hi:kl:nrstx:"))
+    while (1) switch (getopt(argc,argv,":abdef:hi:kl:nrstx:"))
     {
+        case 'a': ratelimit = 1; break;
         case 'b': bskey = 1; break;
         case 'd': dtr = 1; break;
         case 'e': enterkey = 1; break;
@@ -1061,19 +1110,20 @@ int main(int argc, char *argv[])
             if (teefd < 0) die("Can't open tee file %s: %s\n", teename, strerror(errno));
         }
         display(RAW);
+#if SHELLCMD
         if (startup)
         {
             // run startup command
             run(startup);
             startup = NULL; // only once
         }
-
+#endif
         while(1)
         {
             struct pollfd p[] = { { .fd = console, .events = POLLIN },
                                   { .fd = target, .events = POLLIN },
                                   { .fd = qtarget.count ? target : -1, .events = POLLOUT } };
-            poll(p, 3, -1);
+            ratepoll(p, 3);
 
             if (p[0].revents)
             {
@@ -1128,7 +1178,7 @@ int main(int argc, char *argv[])
             }
 
             // send qtarget if target writable, maybe logged as keys
-            if (p[2].revents && dekey(&qtarget, target) <= 0) break;
+            if (p[2].revents && dekey() <= 0) break;
         }
     }
 }

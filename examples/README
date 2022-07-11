@@ -1,18 +1,16 @@
-Nanocom supports running arbitrary shell commands with stdout attached to the
-target device input, stdin attached to the target device output, and stderr
-attached to the terminal.
+If SHELLCMD is enabled in the Makefile then nanocom supports running arbitrary shell commands via the ^\x menu option
+or tyhe -x command line parameter.
 
-Characters output by the shell command to stderr will appear on the terminal.
-Each line is prefaced with a '|' character to indicate that it is shell command
-output.
+The command's stdin and stdout are attached to the remote device via bi-directional pipe, and stderr is attached to
+the console via a pty.
 
-Keys typed to the terminal will be sent to the shell command's stderr. The
-exception is the ^] key which brings up the nanocom menu in the usual way. Note
-^C and so forth are sent to the shell command, which may or may not ignore
-them. However menu command 'x' will always kill a running shell command.
+Characters sent by the command to stderr will appear on the console, with a leading '|' per line to indicate that it
+is shell command output.
 
-This allows programs such as 'sz' to work in a natural way, it also allows
-creation of scripts tt can interact with the user and the target device to
-perform various operations.
+Characters typed on the console can be read via stderr, this includes ^C and so forth. However ^\ still brings up the
+nanocom menu, from there 'x' can be used to kill the running command.
 
-Included in this directory ar example shell and expect scripts.
+Programs such as 'sz' can therefore be used to provide file transfer from or to from the target.
+
+However this also allows creation of scripts that can interact with the user and the target to perform arbitrary
+operations, example scripts are provided here.

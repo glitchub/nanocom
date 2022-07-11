@@ -10,14 +10,17 @@ target contains a '/') or a TCP host (if target contains a ':').
 
 Options:
 
+    -a          - limit transmit to one character per millisecond
     -b          - backspace key sends DEL instead of BS
     -d          - toggle serial port DTR high on start
     -e          - enter key sends LF instead of CR
     -f file     - log console output to specified file
     -h          - display unprintable characters as hex, 2X to display all characters as hex
     -i encoding - encoding for high characters e.g. 'CP437', or '' to display verbatim
+    -k          - with -f, also log key presses
+    -l mS       - flush characters after connect until idle for specified milliseconds
     -n          - don't set serial port to 115200 N-8-1, use it as is
     -r          - try to reconnect target if it won't open or closes with error
     -s          - display timestamp, 2X to display with date
     -t          - enable telnet in binary mode, 2X for ASCII mode (handles CR+NUL)
-
+    -x command  - try to execute command string after first connect

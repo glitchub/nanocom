@@ -1,16 +1,22 @@
 # Example script for nanocom shell command, run with:
 #
-#  ^]x expect example.exp
+#  ^\x expect example.exp
 #
-# The target device is accessed via stdin and stdout, the terminal via stderr.
+# The target device is accessed via pipes on stdin and stdout, the console via a pty on stderr.
 
-# Mirror all target input/output to the console.
+proc die {s} { puts stderr $s; exit 1; }
+
+if {![catch {fconfigure stdout -mode}]} {
+    # stdout is a tty!
+    die "This script should be run as a nanocom shell comand"
+}
+
+# Mirror target input/output to console on stderr
+log_user 0
 log_file -noappend -a /dev/fd/2
 
+# Send a command to the target on stdout, then slurp (and log) stdin until lines stop coming.
 puts stderr "Listing current directory..."
-
-# Send the ls command to the target on stdout, then slurp (and log) stdin until
-# lines stop coming.
 send "ls -al\r"
 expect -timeout 1 "\n" exp_continue
 
