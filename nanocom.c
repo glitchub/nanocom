@@ -24,17 +24,21 @@ char *usage = "Usage:\n"
               "    -d          - toggle serial port DTR high on start\n"
               "    -e          - enter key sends LF instead of CR\n"
               "    -f file     - log console output to specified file\n"
-              "    -h          - display unprintable characters as hex, 2X to display all characters as hex\n"
+              "    -h          - display unprintable characters as hex\n"
+              "    -H          - display all characters as hex\n"
 #if TRANSLIT
-              "    -i encoding - encoding for high characters e.g. 'CP437', or '' to display verbatim\n"
+              "    -i          - display high-bit characters as CP437\n"
+              "    -I charset  - character set for -i, default CP437 ('iconv -l' for list)\n"
 #endif
               "    -k          - with -f, also log key presses\n"
               "    -l mS       - flush characters after connect until idle for specified milliseconds\n"
               "    -n          - don't set serial port to 115200 N-8-1, use it as is\n"
               "    -r          - try to reconnect target if it won't open or closes with error\n"
-              "    -s          - display timestamp, 2X to display with date\n"
+              "    -s          - display timestamps\n"
+              "    -S          - display long timestamps (with date)\n"
 #if TELNET
-              "    -t          - enable telnet in binary mode, 2X for ASCII mode (handles CR+NUL)\n"
+              "    -t          - enable telnet in binary mode\n"
+              "    -T          - enable telnet in ASCII mode (handles CR+NUL)\n"
 #endif
 #if SHELLCMD
               "    -x command  - try to execute command string after first connect\n"
@@ -97,7 +101,8 @@ int dtr = 0;                    // 1 = twiddle serial DTR on connect
 int logkeys = 0;                // 1 = also log key presses (if tee is enabled)
 int flush = 0;                  // mS to flush characters after first connect
 #if TRANSLIT
-char *encoding = NULL;          // encoding name (see iconv -l)
+int encode = 0;                 // 1 = enable encoding
+char *charset = NULL;           // iconv character set, default "CP437"
 #endif
 #if TELNET
 int telnet = 0;                 // 1 = BINARY telnet, 2 = ASCII telnet
@@ -306,7 +311,8 @@ void display(int c)
     static int mode = 0;
 
 #if TRANSLIT
-    static char **strings = NULL;   // table of 128 strings
+    // unicode sequences for high-bit characters
+    static char *translit[128];
 #endif
 
     // RAW cursor state: 0=clean, 1=dirty, 2=dirty with deferred CR
@@ -370,32 +376,32 @@ void display(int c)
 
     if (!mode)                                              // perform one-time init
     {
-        tcgetattr(console, &cooked);                        // save current console config
 #if TRANSLIT
-        if (encoding && *encoding)
+        setlocale(LC_CTYPE, "");
+        iconv_t cd = iconv_open("//TRANSLIT", charset?:"CP437");
+        setlocale(LC_CTYPE, "C");
+        if (cd != (iconv_t)-1)
         {
-            // create table of strings for high characters
-            strings = calloc(128, sizeof(char *));
-            if (!strings) die("%s\n", "Out of memory");
-            setlocale(LC_CTYPE, "");
-            iconv_t cd = iconv_open("//TRANSLIT", encoding);
-            if (cd == (iconv_t)-1) die("Invalid encoding '%s' (try 'iconv -l' for a list)\n", encoding);
             int n;
             for (n = 128; n < 256; n++)
             {
-                // Determine the encoded string for each char and save in
-                // table.
+                // Get the unicode string for each high char
                 char ch = n, *in = &ch, str[16], *out = str;
                 size_t nin = 1, nout = sizeof(str);
-                if (iconv(cd, &in, &nin, &out, &nout) < 0) die("iconv failed: %s\n", strerror(errno));
-                nout = sizeof(str) - nout;
-                strings[n & 127] = nout ? strndup(str, nout) : "?";;
-                if (!strings[n & 127]) die("%s\n", "Out of memory");
+                if (iconv(cd, &in, &nin, &out, &nout) < 0 || nin || nout == sizeof(str)) goto fail;
+                translit[n & 127] = strndup(str, sizeof(str) - nout);
+                if (!translit[n & 127]) die("%s\n", "Out of memory");
             }
             iconv_close(cd);
-            setlocale(LC_CTYPE, "C");
+            if (!charset) charset = "CP437"; // encoding is allowed
+        } else
+        {
+          fail:
+            // die if specifically requested, else leave charset==NULL
+            if (encode || charset) die("%s encoding not supported\n", charset?:"CP437");
         }
 #endif
+        tcgetattr(console, &cooked);                        // save current console config
         atexit(recook);                                     // restore cooked on unexpected exit
         mode = COOKED;                                      // we are now in COOKED mode
     }
@@ -467,16 +473,16 @@ void display(int c)
 #endif
             if (puthex(c)) return;                          // done if shown as hex
 #if TRANSLIT
-            if (encoding)
+            if (encode)                                     // use unicode if enabled
             {
                 if (!dirty) startline();                    // timestamp a blank line
                 else if (dirty > 1) putCR();                // or CR if deferred
-                if (!*encoding) break;                      // -i'' was specified, just go display
-                putcon(strings[c & 127], 0);                // else put encoded string
+                putcon(translit[c & 127], 0);               // put encoded string
                 dirty = 1;
+                return;
             }
 #endif
-            return;
+            break;                                          // show verbatim
 
         default:                                            // all others
             puthex(c);                                      // maybe show hex
@@ -978,6 +984,9 @@ void astat(void) { printf("| Transmit rate limiting is %s.\n", ratelimit ? "on" 
 void bstat(void) { printf("| Backspace key sends %s.\n", bskey ? "DEL" : "BS"); }
 void estat(void) { printf("| Enter key sends %s.\n", enterkey ? "LF" : "CR"); }
 void hstat(void) { printf("| %s characters are shown as hex.\n", (showhex > 1) ? "All" : (showhex ? "Unprintable" : "No")); }
+#ifdef TRANSLIT
+void istat(void) { printf("| %s encoding is %s.\n", charset, encode ? "on" : "off"); }
+#endif
 void kstat(void) { printf("| Key logging is %s.\n", logkeys ? "on" : "off" ); }
 void rstat(void) { printf("| Automatic reconnect is %s.\n", reconnect ? "on" : "off"); }
 void sstat(void) { printf("| Timestamps are %s.\n", (timestamp > 1) ? "on, with date" : (timestamp ? "on" : "off") ); }
@@ -1002,11 +1011,16 @@ int command(void)
 #if SHELLCMD
         case 'f': ret = 1; break; // tell caller to forward the key
 #endif
-        case 'h': showhex = (showhex + 1) % 3; hstat(); break;
+        case 'h': showhex = (showhex != 1); hstat(); break;
+        case 'H': showhex = (showhex != 2) * 2; hstat(); break;
+#if TRANSLIT
+        case 'i': if (charset) encode = !encode, istat(); break;
+#endif
         case 'k': if (teefd) logkeys = !logkeys, kstat(); break;
         case 'q': display(COOKED); exit(0);
         case 'r': reconnect = !reconnect; rstat(); break;
-        case 's': timestamp = (timestamp + 1) % 3; sstat(); break;
+        case 's': timestamp = (timestamp != 1); sstat(); break;
+        case 'S': timestamp = (timestamp != 2) * 2; sstat(); break;
 #if SHELLCMD
         case 'x': if (running) ret = -1; else run(NULL); break;
 #endif
@@ -1028,7 +1042,7 @@ int command(void)
             estat();
             if (showhex) hstat();
 #if TRANSLIT
-            else if (encoding) printf("| High characters are encoded as %s.\n", *encoding ? encoding : "raw bytes");
+            if (charset) istat();
 #endif
             if (reconnect) rstat();
             if (timestamp) sstat();
@@ -1036,17 +1050,24 @@ int command(void)
                    "| The following keys are supported after ^\\:\n"
                    "|    a - toggle transmit rate limiting on or off.\n"
                    "|    b - toggle backspace key between BS and DEL.\n"
-                   "|    e - toggle enter key between CR and LF.\n");
+                   "|    c - toggle enter key between CR and LF.\n");
 #ifdef SHELLCMD
             printf("|    f - forward ^\\ to %s.\n", running ? "shell command" : "target");
 #endif
-            printf("|    h - cycle hex output off, unprintable, or all.\n");
+            printf("|    h - toggle unprintable characters as hex on or off.\n"
+                   "|    H - toggle all characters as hex on or off.\n");
+#if TRANSLIT
+            if (charset) {
+            printf("|    i - toggle %s encoding on or off.\n", charset);
+            }
+#endif
             if (teename) {
             printf("|    k - toggle key logging on or off.\n");
             }
             printf("|    q - close connection and quit.\n"
                    "|    r - toggle automatic reconnect.\n"
-                   "|    s - cycle timestamps off, on, or on with date.\n");
+                   "|    s - toggle timestamps on or off.\n"
+                   "|    S - toggle long timestamps on or off.\n");
 #ifdef SHELLCMD
             printf("|    x - %s.\n", running ? "kill running shell command" : "run a shell command");
 #endif
@@ -1065,7 +1086,7 @@ int command(void)
 
 int main(int argc, char *argv[])
 {
-    while (1) switch (getopt(argc,argv,":abdef:hi:kl:nrstx:"))
+    while (1) switch (getopt(argc,argv,":abdef:hHiI:kl:nrsStTx:"))
     {
         case 'a': ratelimit = 1; break;
         case 'b': bskey = 1; break;
@@ -1073,16 +1094,20 @@ int main(int argc, char *argv[])
         case 'e': enterkey = 1; break;
         case 'f': teename = optarg; break;
         case 'h': if (showhex < 2) showhex++; break;
+        case 'H': showhex = 2; break;
 #if TRANSLIT
-        case 'i': encoding = optarg; break;
+        case 'i': encode = 1; break;
+        case 'I': charset = optarg; break;
 #endif
         case 'k': logkeys = 1; break;
         case 'l': flush = atoi(optarg); break;
         case 'n': native = 1; break;
         case 'r': reconnect = 1; break;
         case 's': if (timestamp < 2) timestamp++; break;
+        case 'S': timestamp = 2; break;
 #if TELNET
         case 't': if (telnet < 2) telnet++; break;
+        case 'T': telnet = 2; break;
 #endif
 #if SHELLCMD
         case 'x': startup = optarg; break;
