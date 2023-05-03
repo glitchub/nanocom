@@ -12,7 +12,6 @@ target contains a '/') or a TCP host (if target contains a ':').
 
 Options:
 
-    -a          - rate-limit transmit to one character per millisecond
     -b          - backspace key sends DEL instead of BS
     -d          - toggle serial port DTR high on start
     -e          - enter key sends LF instead of CR
@@ -20,13 +19,14 @@ Options:
     -h          - display unprintable characters as hex
     -H          - display all characters as hex
     -i          - display high-bit characters as CP437
-    -I charset  - character set for -i, default CP437 ('iconv -l' for list)
-    -k          - with -f, also log key presses
-    -l mS       - flush characters after connect until idle for specified milliseconds
-    -n          - don't set serial port to 115200 N-8-1, use it as is
+    -I charset  - character set for -i, instead of CP437 ('iconv -l' for list)
+    -l mS       - flush characters after first connect until idle for specified mS
+    -L mS       - also flush on reconnect
+    -n          - don't force target tty to 115200 N-8-1
     -r          - try to reconnect target if it won't open or closes with error
     -s          - display timestamps
-    -S          - display long timestamps (with date)
+    -S          - display date+timestamps
     -t          - enable telnet in binary mode
     -T          - enable telnet in ASCII mode (handles CR+NUL)
-    -x command  - try to execute command string after first connect
+    -x command  - execute command string after first connect
+    -X command  - also execute on reconnect

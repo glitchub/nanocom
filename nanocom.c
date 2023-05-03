@@ -19,7 +19,6 @@ char *usage = "Usage:\n"
               "\n"
               "Options:\n"
               "\n"
-              "    -a          - rate-limit transmit to one character per millisecond\n"
               "    -b          - backspace key sends DEL instead of BS\n"
               "    -d          - toggle serial port DTR high on start\n"
               "    -e          - enter key sends LF instead of CR\n"
@@ -28,20 +27,21 @@ char *usage = "Usage:\n"
               "    -H          - display all characters as hex\n"
 #if TRANSLIT
               "    -i          - display high-bit characters as CP437\n"
-              "    -I charset  - character set for -i, default CP437 ('iconv -l' for list)\n"
+              "    -I charset  - character set for -i, instead of CP437 ('iconv -l' for list)\n"
 #endif
-              "    -k          - with -f, also log key presses\n"
-              "    -l mS       - flush characters after connect until idle for specified milliseconds\n"
-              "    -n          - don't set serial port to 115200 N-8-1, use it as is\n"
+              "    -l mS       - flush characters after first connect until idle for specified mS\n"
+              "    -L mS       - also flush on reconnect\n"
+              "    -n          - don't force target tty to 115200 N-8-1\n"
               "    -r          - try to reconnect target if it won't open or closes with error\n"
               "    -s          - display timestamps\n"
-              "    -S          - display long timestamps (with date)\n"
+              "    -S          - display date+timestamps\n"
 #if TELNET
               "    -t          - enable telnet in binary mode\n"
               "    -T          - enable telnet in ASCII mode (handles CR+NUL)\n"
 #endif
 #if SHELLCMD
-              "    -x command  - try to execute command string after first connect\n"
+              "    -x command  - execute command string after first connect\n"
+              "    -X command  - also execute on reconnect\n"
 #endif
               ;
 
@@ -51,6 +51,7 @@ char *usage = "Usage:\n"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/signal.h>
@@ -76,6 +77,11 @@ char *usage = "Usage:\n"
 #include <pty.h>
 #endif
 
+#include "queue.h"
+#if TELNET
+#include "telnet.h"
+#endif
+
 // ASCII controls of interest
 #define NUL 0
 #define BS 8
@@ -91,26 +97,28 @@ char *usage = "Usage:\n"
 // options
 char *targetname;               // target name, eg "/dev/ttyX" or "host:port"
 char *teename = NULL;           // tee file name
-int reconnect = 0;              // 1 = reconnect after failure
+bool reconnect = false;         // true = reconnect after failure
 int showhex = 0;                // 1 = show received unprintable as hex, 2 = show all as hex
-int enterkey = 0;               // 1 = enter key sends LF instead of CR
-int bskey = 0;                  // 1 = send DEL for BS
-int native = 0;                 // 1 = don't force serial 115200 N81
+bool enterkey = false;          // true = enter key sends LF instead of CR
+bool bskey = false;             // true = send DEL for BS
+bool native = false;            // true = don't force serial 115200 N81
 int timestamp = 0;              // 1 = show time, 2 = show date and time
-int dtr = 0;                    // 1 = twiddle serial DTR on connect
-int logkeys = 0;                // 1 = also log key presses (if tee is enabled)
-int flush = 0;                  // mS to flush characters after first connect
+bool dtr = false;               // true = twiddle serial DTR on connect
+int flush = 0;                  // mS to flush characters after connect
+bool reflush = false;           // true if flush on reconnect
+
 #if TRANSLIT
-int encode = 0;                 // 1 = enable encoding
+bool encode = false;            // true = enable encoding
 char *charset = NULL;           // iconv character set, default "CP437"
 #endif
 #if TELNET
-int telnet = 0;                 // 1 = BINARY telnet, 2 = ASCII telnet
+int telnet = 0;                 // 0=disabled, 1=binary, 2=ascii
+void *tctx = NULL;              // telnet context
 #endif
 #if SHELLCMD
-char *startup = NULL;           // initial shell command to run
+char *start = NULL;             // initial shell command to run
+bool restart = false;           // true if also run on reconnect
 #endif
-int ratelimit = 0;              // 1 = rate-limit transmit to one character per millisecond
 
 // Other globals
 int target = 0;                 // target device or socket, if > 0
@@ -120,7 +128,7 @@ struct termios cooked;          // initial cooked console termios
 char *running = NULL;           // name of currently running shell command or NULL, affects display() and command()
 #endif
 
-#define console 1               // Assume stdin is the console device
+#define console STDOUT_FILENO   // console is stdout
 
 // Console modes for display()
 #define COOKED -1               // COOKED, set whatever state the console was in to start with
@@ -136,21 +144,15 @@ void recook(void) { display(RECOOK); }
 // restore console to cooked mode and die
 #define die(...) recook(), fprintf(stderr, __VA_ARGS__), exit(1)
 
-// Return monotonic nanoseconds since boot
-int64_t nS(void)
-{
-    struct timespec t;
-    if (clock_gettime(CLOCK_MONOTONIC, &t)) die("clock_gettime failed: %s\n", strerror(errno));
-    return ((int64_t)t.tv_sec * 1000*1000*1000) + t.tv_nsec;
-}
-
-// Put character(s) to file descriptor, if size is 0 use strlen(s). Return -1
-// on unrecoverable error.
 #define bytes(...) (unsigned char []){__VA_ARGS__}  // define an array of bytes
+
+queue qtarget = {0};            // queued data to be sent to target
+
+// Put character(s) to file descriptor, if size is 0 use strlen(s). Return -1 on unrecoverable error.
 int put(int fd, const void *s, size_t size)
 {
-    if (!s) return 0;                                       // ignore NULL
-    if (!size) size = strlen(s);                            // get size
+    if (!s) return 0;             // ignore NULL
+    if (!size) size = strlen(s);
     while (size)
     {
         int n = write(fd, s, size);
@@ -161,125 +163,11 @@ int put(int fd, const void *s, size_t size)
     return 0;
 }
 
-typedef struct
-{
-    int head, count, size;
-    unsigned char *data;
-} queue;
-
-queue qtarget = {0};            // target can block, queue outgoing data
-
-// Add count bytes of data to specified queue, which is expanded as needed to fit
-void putq(queue *q, void *data, int count)
-{
-    if (q->size <= q->count + count)
-    {
-        if (!q->size) q->size = 1024; // first time init
-        while (q->size <= q->count + count) q->size *= 2;
-        q->data = realloc(q->data, q->size); // just malloc() if q->data == NULL
-        if (!q->data) die("putq failed: %s\n", strerror(errno));
-    }
-
-    for (int i = 0; i < count; i++, q->count++)
-        q->data[(q->head + q->count) % q->size] = *(unsigned char *)(data+i);
-}
-
-// Point *data at a monolithic chunk of queue data and return its length, or 0
-// if queue is empty. Caller must call delq() once the getq data has been
-// consumed.
-int getq(queue *q, void **data)
-{
-    if (!q->count) return 0;
-    *data = q->data + q->head;
-    int len = q->size - q->head;
-    if (len > q->count) len = q->count;
-    return len;
-}
-
-// Remove specified number of characters from queue, after using getq.
-void delq(queue *q, int count)
-{
-    if (!count) return;
-    if (count < 0 || count >= q->count)
-    {
-        q->count = 0;
-        q->head = 0;
-        return;
-    }
-    q->count -= count;
-    q->head = (q->head + count) % q->size;
-}
-
-// Move data from queue to file descriptor, return number of bytes written
-// (possibly 0) or -1 if error.
-int dequeue(queue *q, int fd)
-{
-    void *p;
-    int n = getq(q, &p);
-    if (!n) return 0;
-    int r = write(fd, p, n);
-    if (r > 0) delq(q, r);
-    return r;
-}
-
-// Perform poll wait on specified pollfd, where the final entry is specifically for pending target fd. If ratelimiting
-// enabled, ignore pending target until ratenext expires.
-int64_t ratenext = 0; // time when next key can send
-int ratepoll(struct pollfd *p, int n)
-{
-    if (ratelimit && ratenext)
-    {
-        int64_t remaining = ratenext - nS();
-        if (remaining > 0 && remaining < 1000000)
-        {
-            struct timespec t = {0, remaining};
-            int r = ppoll(p, n-1, &t, NULL);  // not the last vector
-            if (r) return r;
-        }
-    }
-    // here, not ratelimiting or timeout
-    ratenext = 0;
-    return poll(p, n, -1); // all vectors
-
-}
-
-// Dequeue keys from qtarget to target, possibly with logging, and return number of characters sent, or <0 if error.
-// If ratelimiting, only dequeue 1 key and set ratenext for ratepoll()
-int dekey(void)
-{
-    if (!ratelimit && (!teefd || !logkeys))       // nothing special
-        return dequeue(&qtarget, target);   // dequeue the entire thing
-    void *p;
-    int n = getq(&qtarget, &p);
-    if (!n) return 0;
-    if (ratelimit)
-    {
-        n = 1;                      // only 1 if rate-limited
-        ratenext = nS() + 1000000;  // allow next in 1 mS
-    }
-    int i = 0;
-    for (; i < n; i++)
-    {
-        int r = write(target, p+i, 1);
-        if (r < 0) return r;
-        if (!r) break;
-        if (logkeys)
-        {
-            char s[10];
-            sprintf(s, "[key %02X]", *(unsigned char *)(p+i));
-            put(teefd, s, 8);
-        }
-    }
-    delq(&qtarget, i);
-    return i;
-}
-
 // Mark file descriptor as non-blocking
 #define nonblocking(fd) if (fcntl(fd, F_SETFL, O_NONBLOCK)) die("fcntl %d failed: %s\n", fd, strerror(errno))
 
-// Wait for POLLIN (readable) or POLLOUT (writable) bits on specified file
-// descriptor, returns -1 if error, 0 if timeout, else the set bit.
-// Timeout is in mS, -1 never times out.
+// Wait for POLLIN (readable) or POLLOUT (writable) bits on specified file descriptor, returns -1 if error, 0 if
+// timeout, else the set bit.  Timeout is in mS, -1 never times out.
 int await(int fd, int events, int timeout)
 {
     struct pollfd p = { .fd = fd, .events = events };
@@ -302,9 +190,8 @@ int key(int timeout)
     die("Console error: %s\n", strerror(errno));
 }
 
-// Given one of the modes above, configure the console. Or given a character in
-// RAW mode, display the character with timestamps, high-character encoding,
-// hex conversion, and mirror to teefile if enabled.
+// Given one of the modes above, configure the console. Or given a character in RAW mode, display the character with
+// timestamps, high-character encoding, hex conversion, and mirror to teefile if enabled.
 void display(int c)
 {
     // Current mode, 0 if uninitialized
@@ -494,186 +381,12 @@ void display(int c)
     dirty = 1;
 }
 
-#if TELNET
-// Magic telnet IAC characters, these are also used as states
-#define SB 250      // IAC SB = start suboption
-#define SE 240      // IAC SE = end suboption
-#define WILL 251    // IAC WILL XX = will support option XX
-#define WONT 252    // IAC WONT XX = won't perform option XX
-#define DO 253      // IAC DO XX = do perform option XX
-#define DONT 254    // IAC DONT XX = don't perform option XX
-#define IAC 255     // IAC IAC = literal 0xff character
+// sigwinch signal hander, technically should be #ifdef TELNET but complicates usage
+bool sigwinch = false;
+void set_sigwinch(int sig) { sigwinch = true; }
 
-// Derived states
-#define SBX 0x100   // waiting for end of suboption
-#define SBTT 0x200  // waiting for TTYPE suboption command
-
-// The "XX" options of interest
-#define BINARY 0    // binary (doesn't use CR+NUL)
-#define SECHO 1     // server echo
-#define SGA 3       // suppress go ahead (we require this)
-#define TTYPE 24    // terminal type aka $TERM
-#define NAWS 31     // Negotiate About Window Size
-
-// Given a character from target, process telnet IAC commands and return -1 if
-// character was swallowed else 0. Call with -1 after connect to initialize the
-// iac state machine.
-int iac(int c)
-{
-    if (!telnet) return 0; // only if telnet enabled
-
-    // Send various IAC messages
-    void senddo(int c) { putq(&qtarget, bytes(IAC, DO, c), 3); }
-    void senddont(int c) { putq(&qtarget, bytes(IAC, DONT, c), 3); }
-    void sendwill(int c) { putq(&qtarget, bytes(IAC, WILL, c), 3); }
-    void sendwont(int c) { putq(&qtarget, bytes(IAC, WONT, c), 3); }
-
-    static int state = 0;   // IAC state
-    static int isinit = 0;  // true if we've sent our initial IAC requests
-    static int wascr = 0;   // true if last character was CR in ASCII mode
-
-    if (c < 0)
-    {
-        // initialize, when connection is established
-        state = 0;
-        isinit = 0;
-        wascr = 0;
-        return -1;
-    }
-
-    c &= 0xff;
-
-    switch(state)
-    {
-        case 0:
-            if (c == IAC)                           // escape?
-            {
-                state = IAC;                        // remember it
-                break;
-            }
-
-            if (telnet > 1)                         // ASCII mode?
-            {
-                if (c == NUL && wascr)              // swallow NUL after CR
-                {
-                    wascr = 0;
-                    break;
-                }
-                wascr = c == CR;                    // remember CR
-            }
-            return 0;                               // caller can send it
-
-        case IAC:
-            switch(c)
-            {
-                case IAC:                           // escaped
-                    state = 0;
-                    return 0;                       // caller can send it
-
-                case SB:                            // use command code as state
-                case WILL:
-                case WONT:
-                case DO:
-                case DONT:
-                    state = c;
-                    break;
-
-                default:                            // ignore any other
-                    state = 0;
-                    break;
-            }
-            if (!isinit)
-            {
-                // Send our initial requests to server.
-                senddo(SGA);
-                sendwill(SGA);
-                sendwill(TTYPE);
-                senddo(SECHO);
-                if (telnet == 1)
-                {
-                    // binary unless started with -tt
-                    senddo(BINARY);
-                    sendwill(BINARY);
-                }
-                isinit = 1;
-            }
-            break;
-
-        case WILL:
-            state = 0;
-            switch(c)
-            {
-                case BINARY:
-                    if (telnet > 1) senddont(BINARY);
-                    break;
-
-                case SGA:
-                case SECHO:
-                    break;
-
-                default:
-                    senddont(c);
-                    break;
-            }
-            break;
-
-         case DO:
-            state = 0;
-            switch(c)
-            {
-                case BINARY:
-                    if (telnet > 1) sendwont(BINARY);
-                    break;
-
-                case SGA:
-                case TTYPE:
-                    break;
-
-                default:
-                    sendwont(c);
-                    break;
-            }
-            break;
-
-         case DONT:
-         case WONT:
-            state = 0;
-            break;
-
-        case SB:                                    // expecting first suboption byte
-            if (c == IAC) state = SE;
-            else if (c == TTYPE) state = SBTT;
-            else state = SBX;
-            break;
-
-        case SBTT:                                  // expecting terminal type send command
-            if (c == IAC) { state = SE; break; }
-            if (c == 1)
-            {
-                char *term = getenv("TERM") ?: "dumb";
-                putq(&qtarget, bytes(IAC, SB, TTYPE, 0), 4);
-                putq(&qtarget, term, strlen(term));
-                putq(&qtarget, bytes(IAC, SE), 2);
-            }
-            state = SBX;
-            break;
-
-        case SBX:                                   // wait for end of suboption
-            if (c == IAC) state = SE;               // just wait for IAC
-            break;
-
-        case SE:                                    // IAC in suboption
-            if (c == SE) state = 0;                 // done if SE
-            else state = SBX;                       // else keep waiting
-            break;
-
-    }
-    return -1; // character is swalloed
-}
-#endif
-
-// Connect or reconnect to specified targetname and set the 'target' file
-// descriptor. Targetname can be in form "host:port" or "/dev/ttyXXX".
+// Connect or reconnect to specified targetname and set the 'target' file descriptor. Targetname can be in form
+// "host:port" or "/dev/ttyXXX".
 void doconnect()
 {
     int first = 1;
@@ -762,16 +475,22 @@ void doconnect()
 
     nonblocking(target);        // make sure target is non-blocking
 
-    if (flush > 0) while (await(target, POLLIN, flush) > 0)
+    if (flush) while (await(target, POLLIN, flush) > 0)
     {
         char fb[1024];
-        if (read(target, fb, sizeof(fb)) <= 0) break;
+        if (read(target, fb, sizeof(fb)) < 0) break; // well, just break on read error
     }
-    flush = 0;                  // first time only
+    if (!reflush) flush = 0;
 
-    delq(&qtarget, -1);         // empty qtarget
+    delq(&qtarget, -1);         // wipe qtarget if reconnecting
+
 #if TELNET
-    iac(-1);                    // init telnet
+    if (telnet)
+    {
+        if (tctx) free(tctx);   // maybe free old context
+        tctx = init_telnet(&qtarget, telnet == 1, getenv("TERM") ?: "dumb"); // target queue, binary, termtype
+        sigwinch = true;        // trigger resize
+    }
 #endif
 
     printf("| Connected to %s, command key is ^\\.\n", targetname);
@@ -785,6 +504,7 @@ int command(void);
 void run(char *cmd)
 {
     display(WARM);
+
     char buf[256];
     if (cmd)
         snprintf(buf, sizeof(buf), "%s", cmd);
@@ -810,14 +530,9 @@ void run(char *cmd)
         #define rend(p) p[0] // read end
         #define wend(p) p[1] // write end
 
-        // use a pty for command stderr
-        struct winsize ws;
-        ioctl(console, TIOCGWINSZ, &ws);
-        ws.ws_col -= 28; // parent may prepend "| " and a timestamp
-
         // shell gets a cooked pty to use for stderr
         int cmderr;
-        int pid = forkpty(&cmderr, NULL, &cooked, &ws);
+        int pid = forkpty(&cmderr, NULL, &cooked, NULL);
         if (pid < 0) die("Can't forkpty: %s\n", strerror(errno));
         if (!pid)
         {
@@ -838,13 +553,13 @@ void run(char *cmd)
         // cmdin can block, so queue it
         queue qcmdin = {0};
 
-        // 1 = aborted by user
-        int aborted = 0;
+        // true if aborted by user ^\c
+        bool aborted = false;
 
         // count bytes sent and received by child
         int tx = 0, rx = 0;
 
-        // cmdout to qtarget, handles IACs, return bytes read or -1
+        // cmdout to qtarget, return bytes read or -1
         int cmdout2qtarget(void)
         {
             unsigned char bf[1024];
@@ -852,11 +567,9 @@ void run(char *cmd)
             for (int i = 0; i < n; i++)
             {
 #if TELNET
-                if (telnet && bf[i] == IAC) putq(&qtarget, bytes(IAC, IAC), 2);
-                else if (telnet > 1 && bf[i] == CR) putq(&qtarget, bytes(CR, NUL), 2);
-                else
+                if (!telnet || tx_telnet(tctx, bf[i]))
 #endif
-                putq(&qtarget, &bf[i], 1);
+                    putq(&qtarget, &bf[i], 1);
                 tx++;
             }
             return n;
@@ -875,14 +588,14 @@ void run(char *cmd)
 
         while (1)
         {
-            struct pollfd p[] = { { .fd = cmderr, .events = POLLIN },                                   // cmderr to console
-                                  { .fd = console, .events = POLLIN },                                  // console to cmderr
-                                  { .fd = qcmdin.count < 4096 ? target : -1, .events = POLLIN },        // target to qcmdin, only if space
-                                  { .fd = qtarget.count < 4096 ? rend(cmdout) : -1, .events = POLLIN }, // cmdout to qtarget, only if space
-                                  { .fd = qcmdin.count ? wend(cmdin) : -1, .events = POLLOUT },         // qcmdin to cmdin, only if something in qcmdin
-                                  { .fd = qtarget.count ? target : -1, .events = POLLOUT } };           // qtarget to target, only if something in qtarget (must be last)
+            struct pollfd p[] = { { .fd = cmderr, .events = POLLIN },                                       // cmderr to console
+                                  { .fd = console, .events = POLLIN },                                      // console to cmderr
+                                  { .fd = availq(&qcmdin) < 4096 ? target : -1, .events = POLLIN },         // target to qcmdin, only if space
+                                  { .fd = availq(&qtarget) < 4096 ? rend(cmdout) : -1, .events = POLLIN },  // cmdout to qtarget, only if space
+                                  { .fd = availq(&qcmdin) ? wend(cmdin) : -1, .events = POLLOUT },          // qcmdin to cmdin, only if something in qcmdin
+                                  { .fd = availq(&qtarget) ? target : -1, .events = POLLOUT } };            // qtarget to target, only if something in qtarget
 
-            int r = ratepoll(p, 6);
+            int r = poll(p, 6, -1);
             if (r <= 0) break;
 
             if (p[0].revents && cmderr2console() <= 0) break; // cmderr to console
@@ -896,7 +609,7 @@ void run(char *cmd)
                     int r = command();  // handle it, 0 = done, -1 = user abort, 1 = send command key to target
                     if (r < 0)
                     {
-                        aborted = 1;
+                        aborted = true;
                         break;
                     }
                     if (!r) c = 0;      // discard
@@ -912,7 +625,7 @@ void run(char *cmd)
                 if (n <= 0) break;
                 for (int i = 0; i < n; i++)
 #if TELNET
-                    if (!iac(bf[i]))
+                    if (!telnet || rx_telnet(tctx, bf[i]))
 #endif
                         putq(&qcmdin, bf+i, 1);
             }
@@ -927,20 +640,16 @@ void run(char *cmd)
                 rx += n;
             }
 
-            if (p[5].revents)
-            {
-                // qtarget to target, maybe logged as keys
-                if (dekey() <= 0) break;
-            }
-
+            if (p[5].revents && dequeue(&qtarget, target) <= 0) break; // qtarget to target
         }
 
         // here, I/O error (possibly because of child exit) or abort.
         close(wend(cmdin)); // this may cause child to exit
-        free(qcmdin.data);  // done with qcmdin
+        freeq(&qcmdin);
 
-        // maybe flush pended cmdout
+        // maybe flush pended cmdout to qtarget
         if (!aborted) while (cmdout2qtarget() > 0);
+
         close(rend(cmdout));
 
         // flush pended cmderr
@@ -980,14 +689,12 @@ void run(char *cmd)
 }
 #endif
 
-void astat(void) { printf("| Transmit rate limiting is %s.\n", ratelimit ? "on" : "off" ); }
 void bstat(void) { printf("| Backspace key sends %s.\n", bskey ? "DEL" : "BS"); }
 void estat(void) { printf("| Enter key sends %s.\n", enterkey ? "LF" : "CR"); }
 void hstat(void) { printf("| %s characters are shown as hex.\n", (showhex > 1) ? "All" : (showhex ? "Unprintable" : "No")); }
 #ifdef TRANSLIT
 void istat(void) { printf("| %s encoding is %s.\n", charset, encode ? "on" : "off"); }
 #endif
-void kstat(void) { printf("| Key logging is %s.\n", logkeys ? "on" : "off" ); }
 void rstat(void) { printf("| Automatic reconnect is %s.\n", reconnect ? "on" : "off"); }
 void sstat(void) { printf("| Timestamps are %s.\n", (timestamp > 1) ? "on, with date" : (timestamp ? "on" : "off") ); }
 
@@ -1005,39 +712,30 @@ int command(void)
     printf("%c\n", (c >= ' ' && c <= '~') ? c : 0);
     switch(c)
     {
-        case 'a': ratelimit = !ratelimit; astat(); break;
         case 'b': bskey = !bskey; bstat(); break;
         case 'e': enterkey = !enterkey; estat(); break;
-#if SHELLCMD
-        case 'f': ret = 1; break; // tell caller to forward the key
-#endif
-        case 'h': showhex = (showhex != 1); hstat(); break;
+        case 'h': showhex = !showhex; hstat(); break;
         case 'H': showhex = (showhex != 2) * 2; hstat(); break;
 #if TRANSLIT
         case 'i': if (charset) encode = !encode, istat(); break;
 #endif
-        case 'k': if (teefd) logkeys = !logkeys, kstat(); break;
         case 'q': display(COOKED); exit(0);
         case 'r': reconnect = !reconnect; rstat(); break;
-        case 's': timestamp = (timestamp != 1); sstat(); break;
-        case 'S': timestamp = (timestamp != 2) * 2; sstat(); break;
+        case 's': timestamp = !timestamp; sigwinch = true; sstat(); break;
+        case 'S': timestamp = (timestamp != 2) * 2; sigwinch = true; sstat(); break;
 #if SHELLCMD
         case 'x': if (running) ret = -1; else run(NULL); break;
 #endif
+        case '\\': ret = 1; break; // tell caller to forward the key
         case '?':
             printf("| Connected to %s.\n", targetname);
 #if SHELLCMD
             if (running) printf("| Running shell command '%s'.\n", running);
 #endif
 #if TELNET
-            if (telnet) printf("| Telnet is enabled in %s mode.\n", telnet == 1 ? "binary" : "ASCII");
+            if (telnet) printf("| Telnet is enabled in %s mode.\n", (telnet == 1) ? "binary" : "ASCII");
 #endif
-            if (teefd)
-            {
-                printf("| Console output is logged to %s.\n", teename);
-                kstat();
-            }
-            if (ratelimit) astat();
+            if (teefd) printf("| Console output is logged to %s.\n", teename);
             bstat();
             estat();
             if (showhex) hstat();
@@ -1048,33 +746,29 @@ int command(void)
             if (timestamp) sstat();
             printf("|\n"
                    "| The following keys are supported after ^\\:\n"
-                   "|    a - toggle transmit rate limiting on or off.\n"
                    "|    b - toggle backspace key between BS and DEL.\n"
-                   "|    c - toggle enter key between CR and LF.\n");
-#ifdef SHELLCMD
-            printf("|    f - forward ^\\ to %s.\n", running ? "shell command" : "target");
-#endif
-            printf("|    h - toggle unprintable characters as hex on or off.\n"
+                   "|    c - toggle enter key between CR and LF.\n"
+                   "|    h - toggle unprintable characters as hex on or off.\n"
                    "|    H - toggle all characters as hex on or off.\n");
 #if TRANSLIT
             if (charset) {
             printf("|    i - toggle %s encoding on or off.\n", charset);
             }
 #endif
-            if (teename) {
-            printf("|    k - toggle key logging on or off.\n");
-            }
             printf("|    q - close connection and quit.\n"
                    "|    r - toggle automatic reconnect.\n"
                    "|    s - toggle timestamps on or off.\n"
                    "|    S - toggle long timestamps on or off.\n");
 #ifdef SHELLCMD
             printf("|    x - %s.\n", running ? "kill running shell command" : "run a shell command");
+            printf("|    \\ - send ^\\ to %s.\n", running ? "shell command" : "target");
+#else
+            printf("|    \\ - send ^\\ to target.");
 #endif
             printf("|\n"
                    "| Hit any key to continue...");
             display(RAW);
-            key(5000); // wait 5 seconds
+            key(5000); // Wait up to 5 seconds, this matters when target is spewing data.
             display(COOKED);
             printf("\n");
             display(RAW);
@@ -1086,31 +780,31 @@ int command(void)
 
 int main(int argc, char *argv[])
 {
-    while (1) switch (getopt(argc,argv,":abdef:hHiI:kl:nrsStTx:"))
+    while (1) switch (getopt(argc,argv,":bdef:hHiI:l:L:nrsStTx:X:"))
     {
-        case 'a': ratelimit = 1; break;
-        case 'b': bskey = 1; break;
-        case 'd': dtr = 1; break;
-        case 'e': enterkey = 1; break;
+        case 'b': bskey = true; break;
+        case 'd': dtr = true; break;
+        case 'e': enterkey = true; break;
         case 'f': teename = optarg; break;
-        case 'h': if (showhex < 2) showhex++; break;
+        case 'h': showhex = 1; break;
         case 'H': showhex = 2; break;
 #if TRANSLIT
-        case 'i': encode = 1; break;
+        case 'i': encode = true; break;
         case 'I': charset = optarg; break;
 #endif
-        case 'k': logkeys = 1; break;
-        case 'l': flush = atoi(optarg); break;
-        case 'n': native = 1; break;
-        case 'r': reconnect = 1; break;
-        case 's': if (timestamp < 2) timestamp++; break;
+        case 'l': flush = atoi(optarg); reflush = false; break;
+        case 'L': flush = atoi(optarg); reflush = true; break;
+        case 'n': native = true; break;
+        case 'r': reconnect = true; break;
+        case 's': timestamp = 1; break;
         case 'S': timestamp = 2; break;
 #if TELNET
-        case 't': if (telnet < 2) telnet++; break;
-        case 'T': telnet = 2; break;
+        case 't': telnet = 1; break; // binary
+        case 'T': telnet = 2; break; // ascii
 #endif
 #if SHELLCMD
-        case 'x': startup = optarg; break;
+        case 'x': start = optarg; restart = false; break;
+        case 'X': start = optarg; restart = true; break;
 #endif
         case -1: goto optx;                 // no more options
         default: die("%s\n", usage);        // invalid options
@@ -1119,8 +813,11 @@ int main(int argc, char *argv[])
     targetname = argv[optind];
 
     signal(SIGPIPE, SIG_IGN);               // ignore broken pipe
-    signal(SIGQUIT, SIG_IGN);               // and ^\,
+    signal(SIGQUIT, SIG_IGN);               // and ^],
     signal(SIGTSTP, SIG_IGN);               // and ^Z
+#ifdef TELNET
+    if (telnet) signal(SIGWINCH, set_sigwinch);
+#endif
 
     while(1)
     {
@@ -1136,19 +833,39 @@ int main(int argc, char *argv[])
         }
         display(RAW);
 #if SHELLCMD
-        if (startup)
+        if (start)
         {
-            // run startup command
-            run(startup);
-            startup = NULL; // only once
+            // run start command
+            run(start);
+            if (!restart) start = NULL;
         }
 #endif
         while(1)
         {
+#if TELNET
+            if (telnet && sigwinch)
+            {
+                // resize telnet window
+                sigwinch = false;
+                struct winsize ws;
+                if (ioctl(console, TIOCGWINSZ, &ws) == 0)
+                {
+                    int cols = ws.ws_col;
+                    switch(timestamp)
+                    {
+                        case 1: cols -= 15; break;  // "[HH:MM:SS.mmm] "
+                        case 2: cols -= 26; break;  // "[YYYY:MM:DD HH:MM:SS.mmm] "
+                    }
+                    resize_telnet(tctx, cols, ws.ws_row);
+                }
+            }
+#endif
+
             struct pollfd p[] = { { .fd = console, .events = POLLIN },
                                   { .fd = target, .events = POLLIN },
-                                  { .fd = qtarget.count ? target : -1, .events = POLLOUT } };
-            ratepoll(p, 3);
+                                  { .fd = availq(&qtarget) ? target : -1, .events = POLLOUT } };
+
+            poll(p, 3, -1);
 
             if (p[0].revents)
             {
@@ -1171,9 +888,7 @@ int main(int argc, char *argv[])
                             putq(&qtarget, bytes(LF), 1);
                         else
 #if TELNET
-                        if (telnet > 1)         // ASCII telnet needs CR+NUL
-                            putq(&qtarget, bytes(CR, NUL), 2);
-                        else
+                        if (!telnet || tx_telnet(tctx, CR))
 #endif
                             putq(&qtarget, bytes(CR), 1);
                         break;
@@ -1197,13 +912,13 @@ int main(int argc, char *argv[])
                 if (n <= 0) break;              // assume dropped if errorr
                 for (int i = 0; i < n; i++)     // for each char
 #if TELNET
-                    if (!iac(bf[i]))            // if not slurped by telnet
+                    if (!telnet || rx_telnet(tctx, bf[i]))
 #endif
                         display(bf[i]);         // display it
             }
 
-            // send qtarget if target writable, maybe logged as keys
-            if (p[2].revents && dekey() <= 0) break;
+            // send qtarget if target writable
+            if (p[2].revents && dequeue(&qtarget, target) <= 0) break;
         }
     }
 }

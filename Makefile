@@ -1,6 +1,8 @@
 CFLAGS = -Wall -Werror -s
 LDFLAGS =
 
+SRCS=nanocom.c queue.c
+
 # comment in one of these
 CFLAGS += -O3 # faster
 # CFLAGS += -Os # smaller
@@ -10,6 +12,7 @@ CFLAGS += -DNETWORK
 
 # comment out to disable telnet support
 CFLAGS += -DTELNET
+SRCS += telnet.c
 
 # comment out to disable high-character transliteration
 CFLAGS += -DTRANSLIT
@@ -22,7 +25,7 @@ LDFLAGS += -lutil
 # CFLAGS += -std=gnu11
 CFLAGS += -Wno-unused-result
 
-nanocom: nanocom.c Makefile; $(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+nanocom: ${SRCS} Makefile ; $(CC) $(CFLAGS) -o $@ ${SRCS} $(LDFLAGS)
 
 .PHONY: clean
 clean:; rm -f nanocom
