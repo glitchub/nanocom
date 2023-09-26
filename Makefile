@@ -17,8 +17,8 @@ SRCS += telnet.c
 # comment out to disable high-character transliteration
 CFLAGS += -DTRANSLIT
 
-# comment out to disable shell command support
-CFLAGS += -DSHELLCMD
+# comment out to disable FX command support
+CFLAGS += -DFXCMD
 LDFLAGS += -lutil
 
 # comment/uncomment as needed to make your gcc happy

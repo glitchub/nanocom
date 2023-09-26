@@ -1,14 +1,15 @@
-# Example script for nanocom shell command, run with:
+#!/bin/expect
+
+# Example expect script for nanocom FX command, run with:
 #
-#  ^\x expect example.exp
+#  ^\x example.exp
 #
 # The target device is accessed via pipes on stdin and stdout, the console via a pty on stderr.
 
-proc die {s} { puts stderr $s; exit 1; }
-
 if {![catch {fconfigure stdout -mode}]} {
     # stdout is a tty!
-    die "This script should be run as a nanocom shell comand"
+    puts stderr "This script should be run as a nanocom FX comand"
+    exit 1
 }
 
 # Mirror target input/output to console on stderr

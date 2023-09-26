@@ -1,14 +1,15 @@
-# Example script for nanocom shell command, run with:
+#!/bin/bash
+
+# Example bash script for nanocom FX command, run with:
 #
-#   ^\x bash example.sh
+#   ^\x example.sh
 #
 # The target device is accessed via pipes on stdin and stdout, the console via a pty on stderr.
 
-die() { echo "$*" >2; exit 1; }
-
 if [ -t 1 ]; then
     # stdout is a tty!
-    die "This script should be run as a nanocom shell command"
+    echo "This script should be run as a nanocom FX command" >&2
+    exit 1
 fi
 
 echo "Listing current directory..." >&2

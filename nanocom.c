@@ -39,13 +39,13 @@ char *usage = "Usage:\n"
               "    -t          - enable telnet in binary mode\n"
               "    -T          - enable telnet in ASCII mode (handles CR+NUL)\n"
 #endif
-#if SHELLCMD
-              "    -x command  - execute command string after first connect\n"
+#if FXCMD
+              "    -x command  - execute FX command after first connect\n"
               "    -X command  - also execute on reconnect\n"
 #endif
               ;
 
-#ifdef SHELLCMD
+#ifdef FXCMD
 #define _GNU_SOURCE // for pipe2()
 #endif
 #include <stdio.h>
@@ -73,7 +73,7 @@ char *usage = "Usage:\n"
 #include <iconv.h>
 #include <locale.h>
 #endif
-#if SHELLCMD
+#if FXCMD
 #include <pty.h>
 #endif
 
@@ -115,8 +115,8 @@ char *charset = NULL;           // iconv character set, default "CP437"
 int telnet = 0;                 // 0=disabled, 1=binary, 2=ascii
 void *tctx = NULL;              // telnet context
 #endif
-#if SHELLCMD
-char *start = NULL;             // initial shell command to run
+#if FXCMD
+char *start = NULL;             // initial FX command to run
 bool restart = false;           // true if also run on reconnect
 #endif
 
@@ -124,8 +124,8 @@ bool restart = false;           // true if also run on reconnect
 int target = 0;                 // target device or socket, if > 0
 int teefd = 0;                  // tee file descriptor, if > 0
 struct termios cooked;          // initial cooked console termios
-#if SHELLCMD
-char *running = NULL;           // name of currently running shell command or NULL, affects display() and command()
+#if FXCMD
+char *running = NULL;           // name of currently running FX command or NULL, affects display() and command()
 #endif
 
 #define console STDOUT_FILENO   // console is stdout
@@ -215,8 +215,8 @@ void display(int c)
     // put start of new line
     void startline(void)
     {
-#if SHELLCMD
-        if (running) { putcon("| ", 0); dirty = 1; }        // indicate shell command output
+#if FXCMD
+        if (running) { putcon("| ", 0); dirty = 1; }        // indicate FX command output
 #endif
         if (!timestamp) return;
         struct timeval t;
@@ -244,8 +244,8 @@ void display(int c)
 
     int puthex(int c)
     {
-#if SHELLCMD
-        if (running) return 0;                              // never hex shell output
+#if FXCMD
+        if (running) return 0;                              // never hex FX output
 #endif
         if (!showhex) return 0;                             // done if hex not enabled
         char s[5];
@@ -355,8 +355,8 @@ void display(int c)
             break;
 
         case 128 ... 255:                                   // high characters
-#if SHELLCMD
-            if (running) break;                             // shell output displays verbatim
+#if FXCMD
+            if (running) break;                             // FX output displays verbatim
 #endif
             if (puthex(c)) return;                          // done if shown as hex
 #if TRANSLIT
@@ -498,11 +498,13 @@ void doconnect()
 
 int command(void);
 
-#if SHELLCMD
-// Run specified shell command with stdin/stdout attached to target and stderr attached to console.
-// If command is NULL, prompt for it.
+#if FXCMD
+// Run specified command with stdin/stdout attached to target and stderr attached to console.
+// If cmd is NULL, prompt for it.
 void run(char *cmd)
 {
+    bool quiet = false;
+
     display(WARM);
 
     char buf[256];
@@ -510,7 +512,6 @@ void run(char *cmd)
         snprintf(buf, sizeof(buf), "%s", cmd);
     else
     {
-        printf("| Enter a shell command to run with stdin/stdout attached to target and stderr attached to console.\n");
         printf("| %s> ", getcwd(buf, sizeof(buf)) ? buf : "");
         fgets(buf, sizeof(buf), stdin);
     }
@@ -518,8 +519,13 @@ void run(char *cmd)
     cmd = strchr(buf, 0);                       // delete trailing whitespace
     while (cmd > buf && isspace(*(cmd-1))) cmd--;
     *cmd = 0;
-    cmd = buf;                                  // and leading whitespace
-    while (isspace(*cmd)) cmd++;
+    cmd = buf;
+    if (*cmd == '-')                            // quiet if starts with '-'
+    {
+        quiet = true;
+        cmd++;
+    }
+    while (isspace(*cmd)) cmd++;                // skip leading whitespace
     if (*cmd)
     {
         running = cmd;                          // remember it globally
@@ -539,8 +545,8 @@ void run(char *cmd)
             // child
             dup2(rend(cmdin), 0);               // stdin is the read end of the input pipe
             dup2(wend(cmdout), 1);              // stdout is the write end of output pipe
-            fprintf(stderr, "Running shell command '%s'...\n", cmd);
-            execl("/bin/sh", "/bin/sh", "-c", cmd, NULL);
+            if (!quiet) fprintf(stderr, "Running FX command '%s'...\n", cmd);
+            execl("/bin/sh", "sh", "-c", cmd, NULL);
         }
 
         // parent
@@ -666,7 +672,7 @@ void run(char *cmd)
             int try[] = {SIGTERM, SIGHUP, SIGINT, SIGKILL, 0};
             for (int i = 0; try[i]; i++)
             {
-                printf("| Sending signal %d...\n", try[i]);
+                if (!quiet) printf("| Sending signal %d...\n", try[i]);
                 kill(-pid, try[i]);
                 for (int i = 0; i < 10; i++)
                 {
@@ -677,11 +683,14 @@ void run(char *cmd)
             wstatus = -1;
         }
         out:
-        printf("| Shell command ");
-        if (WIFEXITED(wstatus)) printf("exited with status %d", WEXITSTATUS(wstatus));
-        else if (WIFSIGNALED(wstatus)) printf("killed by signal %d", WTERMSIG(wstatus));
-        else printf("exited with unknown status %d", wstatus);
-        printf(" after sending %u and receiving %u bytes\n", tx, rx);
+        if (!quiet)
+        {
+            printf("| FX command ");
+            if (WIFEXITED(wstatus)) printf("exited with status %d", WEXITSTATUS(wstatus));
+            else if (WIFSIGNALED(wstatus)) printf("killed by signal %d", WTERMSIG(wstatus));
+            else printf("exited with unknown status %d", wstatus);
+            printf(" after sending %u and receiving %u bytes\n", tx, rx);
+        }
 
         running = NULL; // no longer running
     }
@@ -699,7 +708,7 @@ void rstat(void) { printf("| Automatic reconnect is %s.\n", reconnect ? "on" : "
 void sstat(void) { printf("| Timestamps are %s.\n", (timestamp > 1) ? "on, with date" : (timestamp ? "on" : "off") ); }
 
 // Command key handler. Return 1 if caller should send the COMMAND key to
-// target, -1 if caller should kill running shell command, or 0.
+// target, -1 if caller should kill running FX command, or 0.
 int command(void)
 {
     int ret = 0;
@@ -723,14 +732,14 @@ int command(void)
         case 'r': reconnect = !reconnect; rstat(); break;
         case 's': timestamp = !timestamp; sigwinch = true; sstat(); break;
         case 'S': timestamp = (timestamp != 2) * 2; sigwinch = true; sstat(); break;
-#if SHELLCMD
+#if FXCMD
         case 'x': if (running) ret = -1; else run(NULL); break;
 #endif
         case '\\': ret = 1; break; // tell caller to forward the key
         case '?':
             printf("| Connected to %s.\n", targetname);
-#if SHELLCMD
-            if (running) printf("| Running shell command '%s'.\n", running);
+#if FXCMD
+            if (running) printf("| Running FX command '%s'.\n", running);
 #endif
 #if TELNET
             if (telnet) printf("| Telnet is enabled in %s mode.\n", (telnet == 1) ? "binary" : "ASCII");
@@ -759,9 +768,9 @@ int command(void)
                    "|    r - toggle automatic reconnect.\n"
                    "|    s - toggle timestamps on or off.\n"
                    "|    S - toggle long timestamps on or off.\n");
-#ifdef SHELLCMD
-            printf("|    x - %s.\n", running ? "kill running shell command" : "run a shell command");
-            printf("|    \\ - send ^\\ to %s.\n", running ? "shell command" : "target");
+#ifdef FXCMD
+            printf("|    x - %s.\n", running ? "kill running FX command" : "run FX command");
+            printf("|    \\ - send ^\\ to %s.\n", running ? "FX command" : "target");
 #else
             printf("|    \\ - send ^\\ to target.");
 #endif
@@ -802,7 +811,7 @@ int main(int argc, char *argv[])
         case 't': telnet = 1; break; // binary
         case 'T': telnet = 2; break; // ascii
 #endif
-#if SHELLCMD
+#if FXCMD
         case 'x': start = optarg; restart = false; break;
         case 'X': start = optarg; restart = true; break;
 #endif
@@ -832,7 +841,7 @@ int main(int argc, char *argv[])
             if (teefd < 0) die("Can't open tee file %s: %s\n", teename, strerror(errno));
         }
         display(RAW);
-#if SHELLCMD
+#if FXCMD
         if (start)
         {
             // run start command

@@ -28,5 +28,5 @@ Options:
     -S          - display date+timestamps
     -t          - enable telnet in binary mode
     -T          - enable telnet in ASCII mode (handles CR+NUL)
-    -x command  - execute command string after first connect
+    -x command  - execute FX command after first connect
     -X command  - also execute on reconnect

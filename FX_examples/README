@@ -1,0 +1,17 @@
+"FX" stands for "file transfer", and traditional FX commands are programs such as "sz", "rx", and
+"kermit" that provide in-band file transfer over a serial connection.
+
+In a broader sense, an FX command is any program that expects to communicate with a remote host via
+stdin and stdout, and interact with the user via stderr.
+
+If FXCMD is enabled in the Makefile then nanocom provides the ^\x menu option and the -x command
+line parameter to run FX commands.
+
+Command strings are passed to sh for execution.
+
+Keyboard input is sent to stderr except ^\ which brings up the nanocom menu, and specifically ^\x
+will cause the FX command to be terminated.
+
+Example bash and expect scripts are provided here.
+
+Note prefixing an FX command string with "-" inhibits command start and result reports.
