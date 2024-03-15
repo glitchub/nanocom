@@ -7,7 +7,7 @@
 # The target device is accessed via pipes on stdin and stdout, the console via a pty on stderr.
 
 if [ -t 1 ]; then
-    # stdout is a tty!
+    # stdout is a tty
     echo "This script should be run as a nanocom FX command" >&2
     exit 1
 fi

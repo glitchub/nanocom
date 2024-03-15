@@ -7,7 +7,8 @@ stdin and stdout, and interact with the user via stderr.
 If FXCMD is enabled in the Makefile then nanocom provides the ^\x menu option and the -x command
 line parameter to run FX commands.
 
-Command strings are passed to sh for execution.
+Command strings are passed to sh for execution, with environment variable NANOCOM set to the target
+name that was specified on the command line.
 
 Keyboard input is sent to stderr except ^\ which brings up the nanocom menu, and specifically ^\x
 will cause the FX command to be terminated.

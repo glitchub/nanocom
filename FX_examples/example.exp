@@ -8,7 +8,7 @@
 
 if {![catch {fconfigure stdout -mode}]} {
     # stdout is a tty!
-    puts stderr "This script should be run as a nanocom FX comand"
+    puts stderr "This script should be run as a nanocom FX command"
     exit 1
 }
 

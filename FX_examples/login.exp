@@ -1,0 +1,48 @@
+#!/bin/expect
+
+# Attempt to login, presumably via agetty/mingetty, using credentials based on the NANOCOM target
+# name. Run with:
+#
+#   ^\x login.exp [-d]
+#
+# -d enables debug output
+
+proc die {s} { puts stderr $s; exit 1; }
+
+if {![catch {fconfigure stdout -mode}]} { die "This script should be run as a nanocom FX command" }
+
+# For each possible target, determine username and password
+switch $env(NANOCOM) {
+    "/dev/ttyS0"       { set user "serial-user"; set pass "example"; }
+    "example.com:1234" { set user "network-user"; set pass "example"; }
+    default            { die "Unknown target" }
+}
+
+# Debug or mirror transaction to stderr
+log_user 0
+if { $argv == "-d" } { exp_internal 1 } else { log_file -noappend -a /dev/fd/2 }
+
+for {set try 0; set timeout 3} {$try < 4} {incr try; set timeout 1} {
+
+    send "\r"
+
+    # wait for login prompt
+    expect {
+        "\r"            { exp_continue -continue_timer }
+        "ogin: "        { }
+        "assword: "     { continue }
+        timeout         { continue }
+    }
+
+    # login
+    send "$user\r"
+    set timeout 1
+    expect {
+        "\r"            { exp_continue -continue_timer }
+        "ogin: "        { continue }
+        "assword: "     { send "$pass\r"; exit }
+        timeout         { continue }
+    }
+}
+
+die "Login failed"

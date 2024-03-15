@@ -499,7 +499,7 @@ void doconnect()
 int command(void);
 
 #if FXCMD
-// Run specified command with stdin/stdout attached to target and stderr attached to console.
+// Run specified FX command with stdin/stdout attached to target and stderr attached to console.
 // If cmd is NULL, prompt for it.
 void run(char *cmd)
 {
@@ -535,6 +535,8 @@ void run(char *cmd)
         if (pipe2(cmdin, O_CLOEXEC) || pipe2(cmdout, O_CLOEXEC)) die("Can't create pipes: %s\n", strerror(errno));
         #define rend(p) p[0] // read end
         #define wend(p) p[1] // write end
+
+        setenv("NANOCOM", targetname, 1);       // set targetname in environment
 
         // shell gets a cooked pty to use for stderr
         int cmderr;
