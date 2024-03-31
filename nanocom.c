@@ -43,6 +43,10 @@ char *usage = "Usage:\n"
               "    -x command  - execute FX command after first connect\n"
               "    -X command  - also execute on reconnect\n"
 #endif
+              "\n"
+              "Once connected, press key ^\\ for a menu of command options. Many of the settings\n"
+              "above can be toggled there.\n"
+              "\n"
               ;
 
 #ifdef FXCMD

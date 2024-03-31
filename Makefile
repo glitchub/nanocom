@@ -25,7 +25,7 @@ LDFLAGS += -lutil
 # CFLAGS += -std=gnu11
 CFLAGS += -Wno-unused-result
 
-nanocom: ${SRCS} Makefile ; $(CC) $(CFLAGS) -o $@ ${SRCS} $(LDFLAGS)
+nanocom: ${SRCS} Makefile ; ${CC} ${CFLAGS} -o $@ ${SRCS} ${LDFLAGS}
 
 .PHONY: clean
 clean:; rm -f nanocom
