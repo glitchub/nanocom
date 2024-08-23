@@ -29,6 +29,7 @@ char *usage = "Usage:\n"
               "    -i          - display high-bit characters as CP437\n"
               "    -I charset  - character set for -i, instead of CP437 ('iconv -l' for list)\n"
 #endif
+              "    -k          - disable key input\n"
               "    -l mS       - flush characters after first connect until idle for specified mS\n"
               "    -L mS       - also flush on reconnect\n"
               "    -n          - don't force target tty to 115200 N-8-1\n"
@@ -125,6 +126,7 @@ bool restart = false;           // true if also run on reconnect
 #endif
 
 // Other globals
+bool keylock = false;
 int target = 0;                 // target device or socket, if > 0
 int teefd = 0;                  // tee file descriptor, if > 0
 struct termios cooked;          // initial cooked console termios
@@ -710,6 +712,7 @@ void hstat(void) { printf("| %s characters are shown as hex.\n", (showhex > 1) ?
 #ifdef TRANSLIT
 void istat(void) { printf("| %s encoding is %s.\n", charset, encode ? "on" : "off"); }
 #endif
+void kstat(void) { printf("| Keylock is %s.\n", keylock ? "on" : "off"); }
 void rstat(void) { printf("| Automatic reconnect is %s.\n", reconnect ? "on" : "off"); }
 void sstat(void) { printf("| Timestamps are %s.\n", (timestamp > 1) ? "on, with date" : (timestamp ? "on" : "off") ); }
 
@@ -734,6 +737,7 @@ int command(void)
 #if TRANSLIT
         case 'i': if (charset) encode = !encode, istat(); break;
 #endif
+        case 'k': keylock = !keylock; kstat(); break;
         case 'q': display(COOKED); exit(0);
         case 'r': reconnect = !reconnect; rstat(); break;
         case 's': timestamp = !timestamp; sigwinch = true; sstat(); break;
@@ -757,6 +761,7 @@ int command(void)
 #if TRANSLIT
             if (charset) istat();
 #endif
+            if (keylock) kstat();
             if (reconnect) rstat();
             if (timestamp) sstat();
             printf("|\n"
@@ -770,7 +775,8 @@ int command(void)
             printf("|    i - toggle %s encoding on or off.\n", charset);
             }
 #endif
-            printf("|    q - close connection and quit.\n"
+            printf("|    k - toggle keylock.\n"
+                   "|    q - close connection and quit.\n"
                    "|    r - toggle automatic reconnect.\n"
                    "|    s - toggle timestamps on or off.\n"
                    "|    S - toggle long timestamps on or off.\n");
@@ -795,7 +801,7 @@ int command(void)
 
 int main(int argc, char *argv[])
 {
-    while (1) switch (getopt(argc,argv,":bdef:hHiI:l:L:nrsStTx:X:"))
+    while (1) switch (getopt(argc,argv,":bdef:hHiI:kl:L:nrsStTx:X:"))
     {
         case 'b': bskey = true; break;
         case 'd': dtr = true; break;
@@ -807,6 +813,7 @@ int main(int argc, char *argv[])
         case 'i': encode = true; break;
         case 'I': charset = optarg; break;
 #endif
+        case 'k': keylock = true; break;
         case 'l': flush = atoi(optarg); reflush = false; break;
         case 'L': flush = atoi(optarg); reflush = true; break;
         case 'n': native = true; break;
@@ -886,13 +893,12 @@ int main(int argc, char *argv[])
             {
                 // console to target
                 int c = key(0);
-                switch(c)
+                if (c == COMMAND)
                 {
-                    case COMMAND:               // command key
-                        if (command() == 1)     // maybe forward command key to target
-                            putq(&qtarget, bytes(COMMAND), 1);
-                        break;
-
+                    if (command() == 1) putq(&qtarget, bytes(COMMAND), 1); // maybe forward
+                }
+                else if (!keylock) switch(c)
+                {
                     case BS:                    // backspace sends BS or DEL
                     case DEL:
                         putq(&qtarget, bytes(bskey ? DEL : BS), 1);
