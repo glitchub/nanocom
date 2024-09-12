@@ -29,7 +29,7 @@ char *usage = "Usage:\n"
               "    -i          - display high-bit characters as CP437\n"
               "    -I charset  - character set for -i, instead of CP437 ('iconv -l' for list)\n"
 #endif
-              "    -k          - disable key input\n"
+              "    -k          - enable key lock\n"
               "    -l mS       - flush characters after first connect until idle for specified mS\n"
               "    -L mS       - also flush on reconnect\n"
               "    -n          - don't force target tty to 115200 N-8-1\n"
@@ -712,7 +712,7 @@ void hstat(void) { printf("| %s characters are shown as hex.\n", (showhex > 1) ?
 #ifdef TRANSLIT
 void istat(void) { printf("| %s encoding is %s.\n", charset, encode ? "on" : "off"); }
 #endif
-void kstat(void) { printf("| Keylock is %s.\n", keylock ? "on" : "off"); }
+void kstat(void) { printf("| Key lock is %s.\n", keylock ? "on" : "off"); }
 void rstat(void) { printf("| Automatic reconnect is %s.\n", reconnect ? "on" : "off"); }
 void sstat(void) { printf("| Timestamps are %s.\n", (timestamp > 1) ? "on, with date" : (timestamp ? "on" : "off") ); }
 
@@ -775,7 +775,7 @@ int command(void)
             printf("|    i - toggle %s encoding on or off.\n", charset);
             }
 #endif
-            printf("|    k - toggle keylock.\n"
+            printf("|    k - toggle key lock on or off.\n"
                    "|    q - close connection and quit.\n"
                    "|    r - toggle automatic reconnect.\n"
                    "|    s - toggle timestamps on or off.\n"
