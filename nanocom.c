@@ -767,7 +767,7 @@ int command(void)
             printf("|\n"
                    "| The following keys are supported after ^\\:\n"
                    "|    b - toggle backspace key between BS and DEL.\n"
-                   "|    c - toggle enter key between CR and LF.\n"
+                   "|    e - toggle enter key between CR and LF.\n"
                    "|    h - toggle unprintable characters as hex on or off.\n"
                    "|    H - toggle all characters as hex on or off.\n");
 #if TRANSLIT
