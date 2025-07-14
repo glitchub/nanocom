@@ -377,9 +377,9 @@ void display(int c)
 #endif
             break;                                          // show verbatim
 
-        default:                                            // all others
-            puthex(c);                                      // maybe show hex
-            return;
+        default:                                            // BEL and other hopefully invisible controls
+            if (puthex(c)) return;                          // maybe show hex otherwise pass through
+            break;
     }
 
     // put character to the display
