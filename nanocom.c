@@ -481,13 +481,6 @@ void doconnect()
 
     nonblocking(target);        // make sure target is non-blocking
 
-    if (flush) while (await(target, POLLIN, flush) > 0)
-    {
-        char fb[1024];
-        if (read(target, fb, sizeof(fb)) < 0) break; // well, just break on read error
-    }
-    if (!reflush) flush = 0;
-
     delq(&qtarget, -1);         // wipe qtarget if reconnecting
 
 #if TELNET
@@ -498,6 +491,17 @@ void doconnect()
         sigwinch = true;        // trigger resize
     }
 #endif
+
+    if (flush) while (await(target, POLLIN, flush) > 0)
+    {
+        char bf[1024];
+        int got = read(target, bf, sizeof(bf));
+        if (got <= 0) break; // well, just break on read error
+#if TELNET
+        if (telnet) for (int i = 0; i < got; i++) rx_telnet(tctx, bf[i]); // process telnet controls
+#endif
+    }
+    if (!reflush) flush = 0;
 
     printf("| Connected to %s, command key is ^\\.\n", targetname);
 }
