@@ -621,18 +621,21 @@ void run(char *cmd)
             if (p[1].revents)
             {
                 // console to cmderr
-                int c = key(0);
-                if (c == COMMAND)       // command key
+                int c;
+                while ((c = key(0)) > 0)
                 {
-                    int r = command();  // handle it, 0 = done, -1 = user abort, 1 = send command key to target
-                    if (r < 0)
+                    if (c == COMMAND)       // command key
                     {
-                        aborted = true;
-                        break;
+                        int r = command();  // handle it, 0 = done, -1 = user abort, 1 = send command key to target
+                        if (r < 0)
+                        {
+                            aborted = true;
+                            goto err;
+                        }
+                        if (!r) c = 0;      // discard
                     }
-                    if (!r) c = 0;      // discard
+                    if (c && put(cmderr, bytes(c), 1) != 0) goto err;
                 }
-                if (c && put(cmderr, bytes(c), 1) != 0) break;
             }
 
             if (p[2].revents)
@@ -661,6 +664,7 @@ void run(char *cmd)
             if (p[5].revents && dequeue(&qtarget, target) <= 0) break; // qtarget to target
         }
 
+        err:
         // here, I/O error (possibly because of child exit) or abort.
         close(wend(cmdin)); // this may cause child to exit
         freeq(&qcmdin);
@@ -896,36 +900,39 @@ int main(int argc, char *argv[])
             if (p[0].revents)
             {
                 // console to target
-                int c = key(0);
-                if (c == COMMAND)
+                int c;
+                while ((c = key(0)) > 0)
                 {
-                    if (command() == 1) putq(&qtarget, bytes(COMMAND), 1); // maybe forward
-                }
-                else if (!keylock) switch(c)
-                {
-                    case BS:                    // backspace sends BS or DEL
-                    case DEL:
-                        putq(&qtarget, bytes(bskey ? DEL : BS), 1);
-                        break;
+                    if (c == COMMAND)
+                    {
+                        if (command() == 1) putq(&qtarget, bytes(COMMAND), 1); // maybe forward
+                    }
+                    else if (!keylock) switch(c)
+                    {
+                        case BS:                    // backspace sends BS or DEL
+                        case DEL:
+                            putq(&qtarget, bytes(bskey ? DEL : BS), 1);
+                            break;
 
-                    case LF:                    // enter sends CR or LF
-                        if (enterkey)
-                            putq(&qtarget, bytes(LF), 1);
-                        else
+                        case LF:                    // enter sends CR or LF
+                            if (enterkey)
+                                putq(&qtarget, bytes(LF), 1);
+                            else
 #if TELNET
-                        if (!telnet || tx_telnet(tctx, CR))
+                            if (!telnet || tx_telnet(tctx, CR))
 #endif
-                            putq(&qtarget, bytes(CR), 1);
-                        break;
+                                putq(&qtarget, bytes(CR), 1);
+                            break;
 
-                    case 0:                     // drop 0
-                    case CR:                    // drop CR
-                    case 128 ... 255:           // and high characters
-                        break;
+                        case 0:                     // drop 0
+                        case CR:                    // drop CR
+                        case 128 ... 255:           // and high characters
+                            break;
 
-                    default:                    // send all others
-                        putq(&qtarget, bytes(c), 1);
-                        break;
+                        default:                    // send all others
+                            putq(&qtarget, bytes(c), 1);
+                            break;
+                    }
                 }
             }
 
